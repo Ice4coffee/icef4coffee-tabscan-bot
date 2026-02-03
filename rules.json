@@ -1,0 +1,95 @@
+{
+  "hard_ban_roots": [
+    "1488",
+    "hitler",
+    "heil",
+    "hh",
+    "giltler",
+    "g1tler",
+
+    "nigger",
+    "nigga",
+    "negr",
+    "rasist",
+
+    "jopa",
+    "popa",
+    "popka",
+    "govn",
+    "govnoed",
+    "gandon",
+
+    "pidr",
+    "pidor",
+    "pido",
+
+    "pizd",
+    "piz",
+    "pis",
+    "piss",
+
+    "xuy",
+    "xyu",
+    "xue",
+    "hui",
+
+    "eb",
+    "yeb",
+    "blya",
+    "zalup",
+
+    "dolboeb",
+    "dolbaeb",
+    "dalboeb",
+    "daun",
+    "ebanat",
+
+    "penis",
+    "anus",
+    "dildo",
+
+    "mefedron",
+    "meth",
+    "vape",
+    "vapelite",
+    "vapev4",
+
+    "kotakbas",
+    "kotokbas"
+  ],
+
+  "review_roots": [
+    "niger",
+    "svo",
+    "sexy",
+    "sex",
+    "zxc",
+    "nagibator",
+    "blood",
+    "drug",
+    "weed"
+  ],
+
+  "staff_roles": [
+    "owner",
+    "admin",
+    "helper",
+    "moder",
+    "mod",
+    "staff",
+    "support",
+    "dev",
+    "developer"
+  ],
+
+  "project_roots": [
+    "agera",
+    "agerapvp",
+    "agerapvpclub"
+  ],
+
+  "whitelist_exact": [
+    "maktraher",
+    "picun"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "agera-tabscan-bot",
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "mineflayer": "^4.20.1",
+    "telegraf": "^4.16.3"
+  }
+}
