@@ -108,6 +108,31 @@ const mc = mineflayer.createBot({
   username: MC_USER,
   version: MC_VERSION
 });
+
+const MC_PASSWORD = process.env.MC_PASSWORD;
+
+mc.on("messagestr", (msg) => {
+  const m = msg.toLowerCase();
+
+  if (MC_PASSWORD && (
+      m.includes("login") ||
+      m.includes("авториз") ||
+      m.includes("/l")
+  )) {
+    setTimeout(() => {
+      mc.chat(`/login ${MC_PASSWORD}`);
+      console.log("Sent /login");
+    }, 1500);
+  }
+
+  if (MC_PASSWORD && m.includes("register")) {
+    setTimeout(() => {
+      mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
+      console.log("Sent /register");
+    }, 1500);
+  }
+});
+
 let mcReady=false;
 mc.on("login",()=>{ mcReady=true; console.log("MC logged in"); });
 mc.on("kicked",(r)=>console.log("MC kicked",r));
@@ -206,4 +231,5 @@ if(AUTO_SCAN){
   setTimeout(autoScan,10000);
   setInterval(autoScan,AUTO_SCAN_MINUTES*60*1000);
 }
+
 
