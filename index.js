@@ -3,10 +3,11 @@ import mineflayer from "mineflayer";
 import { Telegraf, Markup } from "telegraf";
 
 /* ================== ENV ================== */
-const BOT_TOKEN = process.env.8580577303:AAErssJcOST4CYDSYeGwQHoh2VhUzZydMhQ;
-const CHAT_ID = process.env.8387197809;
-const PING_USER_ID = process.env.8387197809 ? Number(process.env.PING_USER_ID) : null;
-
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const CHAT_ID = process.env.CHAT_ID;
+const PING_USER_ID = process.env.PING_USER_ID
+  ? Number(process.env.PING_USER_ID)
+  : null;
 const MC_HOST = process.env.MC_HOST;
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
@@ -205,3 +206,4 @@ if(AUTO_SCAN){
   setTimeout(autoScan,10000);
   setInterval(autoScan,AUTO_SCAN_MINUTES*60*1000);
 }
+
