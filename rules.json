@@ -1,64 +1,153 @@
 {
-  "hard_ban_roots": [
-    "1488",
-    "hitler",
-    "heil",
-    "hh",
-    "giltler",
-    "g1tler",
+  "version": 2,
+  "normalization": {
+    "lowercase": true,
+    "strip_invisibles_regex": "[\\u200B-\\u200F\\u202A-\\u202E\\u2060\\uFEFF]",
+    "separators_regex": "[\\s\\-_.:,;|/\\\\~`'\"^*+=()\\[\\]{}<>]+",
+    "collapse_repeats": true,
+    "max_repeat": 2,
+    "leet_map": {
+      "0": "o",
+      "1": "i",
+      "3": "e",
+      "4": "a",
+      "5": "s",
+      "7": "t",
+      "@": "a",
+      "$": "s"
+    }
+  },
 
-    "nigger",
-    "nigga",
-    "negr",
-    "rasist",
+  "rules": [
+    {
+      "id": "BAN_PROFANITY_AMORAL",
+      "action": "BAN",
+      "reason": "Мат / аморальные слова",
+      "words": [
+        "hui","hyi","xuy","xyu","xue",
+        "pizd","piz","pis","piss",
+        "bly","blya","blyat","blya",
+        "eb","ebal","eby","ebalo","ebanat",
+        "yeb","yeban","yebal","yebat",
+        "zalup",
+        "gandon","gand0n",
+        "pezduk","pezduck",
+        "piska",
+        "sosi","soso","coco",
+        "govn","govnoed",
+        "kotakbas","kotokbas"
+      ]
+    },
 
-    "jopa",
-    "popa",
-    "popka",
-    "govn",
-    "govnoed",
-    "gandon",
+    {
+      "id": "BAN_INSULTS",
+      "action": "BAN",
+      "reason": "Оскорбления",
+      "words": [
+        "debill","daun",
+        "pidor","pidr","pido","p1dor",
+        "lox",
+        "idiot","moron",
+        "degenerat","degenerate",
+        "trash","scum","loser",
+        "mudak",
+        "dolboeb","dolbaeb","dalboeb"
+      ]
+    },
 
-    "pidr",
-    "pidor",
-    "pido",
+    {
+      "id": "BAN_BODY_SEX",
+      "action": "BAN",
+      "reason": "Тело / секс / 18+",
+      "words": [
+        "jopa","jopki",
+        "popa","popka","popki",
+        "penis","anus",
+        "dildo",
+        "porn","porno","sex",
+        "cock","dick","pussy","cunt",
+        "anal","analka",
+        "fimoz"
+      ]
+    },
 
-    "pizd",
-    "piz",
-    "pis",
-    "piss",
+    {
+      "id": "BAN_DRUGS",
+      "action": "BAN",
+      "reason": "Наркотики",
+      "words": [
+        "mefedron",
+        "meth",
+        "heroin",
+        "weed",
+        "hash",
+        "amfetamin",
+        "spice"
+      ]
+    },
 
-    "xuy",
-    "xyu",
-    "xue",
-    "hui",
+    {
+      "id": "BAN_EXTREMISM_RACISM",
+      "action": "BAN",
+      "reason": "Экстремизм / расизм",
+      "words": [
+        "1488",
+        "hitler","giltler","g1tler","gitler","heil","hh",
+        "nigger","nigga","negr","rasist"
+      ]
+    },
 
-    "eb",
-    "yeb",
-    "blya",
-    "zalup",
+    {
+      "id": "BAN_CHEATS",
+      "action": "BAN",
+      "reason": "Чит-клиенты / софт",
+      "words": [
+        "newlauncher","flauncher",
+        "augustus","vape","vapelite","vapev4",
+        "doomsday","nursultanclient",
 
-    "dolboeb",
-    "dolbaeb",
-    "dalboeb",
-    "daun",
-    "ebanat",
+        "rise","wurst",
+        "impact","meteor",
+        "sigma","aristois",
+        "liquidbounce",
+        "future","inertia",
+        "kami","rusherhack",
+        "thunderhack","salhack",
 
-    "penis",
-    "anus",
-    "dildo",
+        "novoline","exhibition",
+        "skilled","astolfo",
+        "zeroday","moon",
+        "echo","nexus",
+        "eternity","crimson"
+      ]
+    },
 
-    "mefedron",
-    "meth",
-    "vape",
-    "vapelite",
-    "vapev4",
+    {
+      "id": "BAN_IMPERSONATION",
+      "action": "BAN",
+      "reason": "Маскировка под персонал",
+      "words": [
+        "owner","admin","helper",
+        "moder","mod",
+        "staff","support",
+        "dev","developer",
+        "administrator","moderator"
+      ]
+    },
 
-    "kotakbas",
-    "kotokbas"
+    {
+      "id": "BAN_PROJECT",
+      "action": "BAN",
+      "reason": "Проект / сервер",
+      "words": [
+        "agera",
+        "agerapvp",
+        "agerapvpclub"
+      ]
+    }
   ],
 
-  "review_roots": [
+  "review": [
     "niger",
     "svo",
     "sexy",
@@ -66,26 +155,7 @@
     "zxc",
     "nagibator",
     "blood",
-    "drug",
-    "weed"
-  ],
-
-  "staff_roles": [
-    "owner",
-    "admin",
-    "helper",
-    "moder",
-    "mod",
-    "staff",
-    "support",
-    "dev",
-    "developer"
-  ],
-
-  "project_roots": [
-    "agera",
-    "agerapvp",
-    "agerapvpclub"
+    "drug"
   ],
 
   "whitelist_exact": [
