@@ -289,4 +289,65 @@ tg.command("status", async (c) => {
 });
 
 tg.command("tab", async c=>{
-  const a=c.message.text.split(" ").slice(1).join(" ").
+  const a=c.message.text.split(" ").slice(1).join(" ").trim();
+  if(!a) return c.reply("Пример: /tab ebl");
+  const n=[...new Set(await byPrefix(a))];
+
+  let t=`Tab /msg ${a}\nНайдено: ${n.length}\n\n`;
+  n.slice(0, 200).forEach((x,i)=>t+=`${i+1}) ${x}\n`);
+  if (n.length > 200) t += `\n…ещё ${n.length - 200} (обрежено для команды /tab)`;
+  await sendChunksReply(c,t);
+});
+
+async function tabcheckHandler(c){
+  const a=c.message.text.split(" ").slice(1).join(" ").trim();
+  if(!a) return c.reply("Пример: /tabcheck kotak");
+  const n=[...new Set(await byPrefix(a))];
+  const r=report(`Tabcheck ${a}`, n);
+  await sendChunksReply(c, r.out);
+}
+
+tg.command("tabcheck", tabcheckHandler);
+// алиас на случай опечатки
+tg.command("tabcheak", tabcheckHandler);
+
+tg.command("scanall", async c=>{
+  await c.reply("Сканирую...");
+  const n=await collect(prefixes());
+  const r=report("Full scan", n);
+  await sendChunksReply(c, r.out);
+});
+
+/* ================== AUTO SCAN ================== */
+let lastKey="";
+async function autoScan(){
+  if(!AUTO_SCAN) return;
+  const n=await collect(prefixes());
+  const r=report("Auto scan", n);
+
+  // если ничего нет — молчим
+  if(r.ban===0 && r.rev===0){ lastKey=""; return; }
+
+  const key = norm(r.out).slice(0,300);
+  if(key===lastKey) return;
+  lastKey=key;
+
+  const msg=`Найдены нарушения ${mention(PING_USER_ID)}\n\n`+r.out;
+  await sendChunksChat(tg, CHAT_ID, msg);
+}
+
+/* ======== TG launch (409 fix) ======== */
+async function startTG(){
+  try{ await tg.telegram.deleteWebhook({ drop_pending_updates:true }); }catch{}
+  await tg.launch({ dropPendingUpdates:true });
+  console.log("TG bot started");
+}
+startTG();
+
+process.once("SIGINT",()=>tg.stop("SIGINT"));
+process.once("SIGTERM",()=>tg.stop("SIGTERM"));
+
+if(AUTO_SCAN){
+  setTimeout(autoScan,10000);
+  setInterval(autoScan, AUTO_SCAN_MINUTES*60*1000);
+}
