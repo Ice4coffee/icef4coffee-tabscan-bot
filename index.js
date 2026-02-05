@@ -31,7 +31,6 @@ const cyr  = { "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","�
 function stripColors(s=""){ return s.replace(/§./g,""); }
 function norm(s=""){
   s = stripColors(s).toLowerCase();
-  s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, ""); // invisibles
   s = [...s].map(ch => cyr[ch] || leet[ch] || ch).join("");
   s = s.replace(/[\s_\-\.]+/g,"");
   s = s.replace(/(.)\1{2,}/g,"$1$1");
@@ -73,33 +72,32 @@ function checkNick(name){
 /* ================== UTILS ================== */
 function mention(uid){ return uid ? `[ты](tg://user?id=${uid})` : ""; }
 
-// Telegram limit ~4096, возьмём запас
-const TG_CHUNK = 3500;
-function splitText(t, m=TG_CHUNK){
-  const r=[]; let b="";
-  for(const l of t.split("\n")){
-    if((b+l+"\n").length>m){ r.push(b); b=""; }
-    b+=l+"\n";
-  }
-  if(b) r.push(b);
-  return r;
-}
-
-// чтобы не ловить flood — шлём по очереди и ждём
-async function sendChunks(ctxOrBot, chatId, text, extra = {}) {
-  const parts = splitText(text);
-  for (const p of parts) {
-    if (!p.trim()) continue;
-    if (ctxOrBot.reply) {
-      await ctxOrBot.reply(p, extra);
-    } else {
-      await ctxOrBot.telegram.sendMessage(chatId, p, extra);
+function splitText(t, max = 3500){
+  const parts=[]; let buf="";
+  for(const line of t.split("\n")){
+    if((buf + line + "\n").length > max){
+      parts.push(buf);
+      buf="";
     }
+    buf += line + "\n";
+  }
+  if(buf) parts.push(buf);
+  return parts;
+}
+
+async function sendChunksReply(ctx, text){
+  for(const part of splitText(text)){
+    if(part.trim()) await ctx.reply(part);
   }
 }
 
-// Генератор отчёта: оставляем в тексте только первые 80 строк, остальное — в файл при необходимости
-function report(title,names){
+async function sendChunksChat(bot, chatId, text){
+  for(const part of splitText(text)){
+    if(part.trim()) await bot.telegram.sendMessage(chatId, part, { parse_mode:"Markdown" });
+  }
+}
+
+function report(title, names){
   const ban=[], rev=[];
   for(const n of names){
     const [s,r]=checkNick(n);
@@ -107,32 +105,23 @@ function report(title,names){
     else if(s==="REVIEW") rev.push({n,r});
   }
 
-  let out=`${title}\nНайдено: ${names.length}\n\n`;
+  let out = `${title}\nНайдено: ${names.length}\n\n`;
+
   if(ban.length){
-    out+=`❌ BAN (${ban.length}):\n`;
-    ban.slice(0,80).forEach((x,i)=>out+=`${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
-    out+="\n";
+    out += `❌ BAN (${ban.length}):\n`;
+    ban.forEach((x,i)=> out += `${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
+    out += "\n";
   }
   if(rev.length){
-    out+=`⚠️ REVIEW (${rev.length}):\n`;
-    rev.slice(0,80).forEach((x,i)=>out+=`${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
+    out += `⚠️ REVIEW (${rev.length}):\n`;
+    rev.forEach((x,i)=> out += `${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
   }
-  return {out, ban:ban.length, rev:rev.length, banList: ban, revList: rev};
-}
 
-function makeFullListText(title, names) {
-  // полный список: ник + статус/причина
-  const lines = [`${title}`, `Всего: ${names.length}`, ""];
-  for (const name of names) {
-    const [s, r] = checkNick(name);
-    if (s === "OK") continue; // можно убрать, если хочешь все ники
-    lines.push(`${s}\t${name}\t${r.join("; ")}`);
+  if (ban.length === 0 && rev.length === 0) {
+    out += "✅ Некорректных ников не найдено.\n";
   }
-  return lines.join("\n");
-}
 
-function bufferFromText(text) {
-  return Buffer.from(text, "utf-8");
+  return { out, ban:ban.length, rev:rev.length };
 }
 
 /* ================== MINEFLAYER ================== */
@@ -144,35 +133,56 @@ const mc = mineflayer.createBot({
 });
 
 const MC_PASSWORD = process.env.MC_PASSWORD;
+let loginSent=false, registerSent=false;
 
-let loginSent = false;
-let registerSent = false;
+// Статус бота для /status
+let mcReady=false;
+let mcOnline=false;
+let mcLastError="";
 
-mc.on("messagestr", (msg) => {
+mc.on("messagestr",(msg)=>{
   const m = msg.toLowerCase();
-
-  // чтобы не спамить /login бесконечно
-  if (MC_PASSWORD && !loginSent && (m.includes("login") || m.includes("авториз") || m.includes("/l"))) {
-    loginSent = true;
-    setTimeout(() => {
+  if(MC_PASSWORD && !loginSent && (m.includes("login") || m.includes("авториз") || m.includes("/l"))){
+    loginSent=true;
+    setTimeout(()=> {
       mc.chat(`/login ${MC_PASSWORD}`);
       console.log("Sent /login");
-    }, 1500);
+    },1500);
   }
-
-  if (MC_PASSWORD && !registerSent && m.includes("register")) {
-    registerSent = true;
-    setTimeout(() => {
+  if(MC_PASSWORD && !registerSent && m.includes("register")){
+    registerSent=true;
+    setTimeout(()=> {
       mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
       console.log("Sent /register");
-    }, 1500);
+    },1500);
   }
 });
 
-let mcReady=false;
-mc.on("login",()=>{ mcReady=true; console.log("MC logged in"); });
-mc.on("kicked",(r)=>console.log("MC kicked",r));
-mc.on("error",(e)=>console.log("MC error",e.message));
+mc.on("login",()=>{
+  mcReady=true;
+  mcOnline=true;
+  mcLastError="";
+  console.log("MC logged in");
+});
+
+mc.on("end",()=>{
+  mcReady=false;
+  mcOnline=false;
+  mcLastError="disconnected";
+  console.log("MC end/disconnected");
+});
+
+mc.on("kicked",(r)=>{
+  mcReady=false;
+  mcOnline=false;
+  mcLastError="kicked: " + String(r);
+  console.log("MC kicked",r);
+});
+
+mc.on("error",(e)=>{
+  mcLastError="error: " + String(e.message || e);
+  console.log("MC error",e.message);
+});
 
 /* ================== TAB COMPLETE ================== */
 function tabComplete(bot,text){
@@ -222,10 +232,18 @@ async function collect(ps){
 }
 
 /* ================== TELEGRAM ================== */
-const tg=new Telegraf(BOT_TOKEN);
+const tg = new Telegraf(BOT_TOKEN);
 
-tg.start(c=>c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/myid"));
+tg.start(c=>c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/myid\n/status"));
 tg.command("myid",c=>c.reply(`user_id: ${c.from.id}\nchat_id: ${c.chat.id}`));
+
+tg.command("status", async (c) => {
+  let s = "❌ не в сети / не готов";
+  if (mcOnline && mcReady) s = "✅ на сервере (готов)";
+  else if (mcOnline && !mcReady) s = "🟡 подключён, но ещё не готов";
+  const extra = mcLastError ? `\nПричина: ${mcLastError}` : "";
+  await c.reply(`Статус MC-бота: ${s}\nНик: ${MC_USER}${extra}`);
+});
 
 tg.command("tab", async c=>{
   const a=c.message.text.split(" ").slice(1).join(" ");
@@ -233,7 +251,7 @@ tg.command("tab", async c=>{
   const n=[...new Set(await byPrefix(a))];
   let t=`Tab /msg ${a}\nНайдено: ${n.length}\n\n`;
   n.slice(0,120).forEach((x,i)=>t+=`${i+1}) ${x}\n`);
-  await sendChunks(c, null, t);
+  await sendChunksReply(c,t);
 });
 
 tg.command("tabcheck", async c=>{
@@ -241,22 +259,14 @@ tg.command("tabcheck", async c=>{
   if(!a) return c.reply("Пример: /tabcheck ager");
   const n=[...new Set(await byPrefix(a))];
   const r=report(`Tabcheck ${a}`,n);
-  await sendChunks(c, null, r.out);
+  await sendChunksReply(c,r.out);
 });
 
 tg.command("scanall", async c=>{
   await c.reply("Сканирую...");
   const n=await collect(prefixes());
   const r=report("Full scan",n);
-
-  // если очень много — шлём файлом
-  if (n.length >= 300) {
-    await sendChunks(c, null, r.out + `\n\n📄 Полный список отправляю файлом (слишком много для Telegram).`);
-    const full = makeFullListText("Full scan (FULL LIST)", n);
-    await c.replyWithDocument({ source: bufferFromText(full), filename: "scan_full.txt" });
-  } else {
-    await sendChunks(c, null, r.out);
-  }
+  await sendChunksReply(c,r.out);
 });
 
 /* ================== AUTO SCAN ================== */
@@ -265,41 +275,26 @@ async function autoScan(){
   if(!AUTO_SCAN) return;
   const n=await collect(prefixes());
   const r=report("Auto scan",n);
-
   if(r.ban===0 && r.rev===0){ lastKey=""; return; }
-
   const key=norm(r.out).slice(0,300);
   if(key===lastKey) return;
   lastKey=key;
-
   const msg=`Найдены нарушения ${mention(PING_USER_ID)}\n\n`+r.out;
-
-  // авто-уведомления тоже лучше резать и слать по очереди
-  await sendChunks(tg, CHAT_ID, msg, { parse_mode: "Markdown" });
-
-  // и полный файл, если очень много
-  if (n.length >= 300) {
-    const full = makeFullListText("Auto scan (FULL LIST)", n);
-    await tg.telegram.sendDocument(
-      CHAT_ID,
-      { source: bufferFromText(full), filename: "auto_scan_full.txt" }
-    );
-  }
+  await sendChunksChat(tg, CHAT_ID, msg);
 }
 
-/* ======== Telegram launch fixes (409 & restart) ======== */
-async function startTelegram() {
-  // если когда-то был webhook — убираем
-  try { await tg.telegram.deleteWebhook({ drop_pending_updates: true }); } catch {}
-  await tg.launch({ dropPendingUpdates: true });
+/* ======== TG launch (409 fix) ======== */
+async function startTG(){
+  try{ await tg.telegram.deleteWebhook({ drop_pending_updates:true }); }catch{}
+  await tg.launch({ dropPendingUpdates:true });
   console.log("TG bot started");
 }
-startTelegram();
+startTG();
 
-process.once("SIGINT", () => tg.stop("SIGINT"));
-process.once("SIGTERM", () => tg.stop("SIGTERM"));
+process.once("SIGINT",()=>tg.stop("SIGINT"));
+process.once("SIGTERM",()=>tg.stop("SIGTERM"));
 
 if(AUTO_SCAN){
   setTimeout(autoScan,10000);
-  setInterval(autoScan,AUTO_SCAN_MINUTES*60*1000);
-    }
+  setInterval(autoScan, AUTO_SCAN_MINUTES*60*1000);
+                       }
