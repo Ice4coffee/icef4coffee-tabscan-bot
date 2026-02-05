@@ -1,13 +1,12 @@
 import fs from "fs";
 import mineflayer from "mineflayer";
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf } from "telegraf";
 
 /* ================== ENV ================== */
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const PING_USER_ID = process.env.PING_USER_ID
-  ? Number(process.env.PING_USER_ID)
-  : null;
+const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
+
 const MC_HOST = process.env.MC_HOST;
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
@@ -26,12 +25,13 @@ if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
 let RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
 
 /* ================== NORMALIZE ================== */
-const leet = { "0":"o","1":"i","!":"i","3":"e","4":"a","5":"s","7":"t" };
-const cyr = { "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","к":"k","м":"m","т":"t" };
+const leet = { "0":"o","1":"i","!":"i","3":"e","4":"a","5":"s","7":"t","@":"a","$":"s" };
+const cyr  = { "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","к":"k","м":"m","т":"t" };
 
 function stripColors(s=""){ return s.replace(/§./g,""); }
 function norm(s=""){
   s = stripColors(s).toLowerCase();
+  s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, ""); // invisibles
   s = [...s].map(ch => cyr[ch] || leet[ch] || ch).join("");
   s = s.replace(/[\s_\-\.]+/g,"");
   s = s.replace(/(.)\1{2,}/g,"$1$1");
@@ -47,16 +47,16 @@ function checkNick(name){
 
   if (has1488(n)) return ["BAN",["extremism:1488"]];
 
-  const hard = RULES.hard_ban_roots||[];
+  const hard  = RULES.hard_ban_roots||[];
   const staff = RULES.staff_roles||[];
-  const proj = RULES.project_roots||[];
-  const review = RULES.review_roots||[];
+  const proj  = RULES.project_roots||[];
+  const review= RULES.review_roots||[];
 
   const hardHit = hard.filter(w => n.includes(w));
   if (hardHit.length) return ["BAN", hardHit.map(x=>"hard:"+x)];
 
   const staffHit = staff.some(w => n.includes(w));
-  const projHit = proj.some(w => n.includes(w));
+  const projHit  = proj.some(w => n.includes(w));
 
   if (staffHit && projHit) return ["BAN",["impersonation:project+role"]];
   if (projHit && /\d{2,4}$/.test(n)) return ["BAN",["impersonation:project+digits"]];
@@ -72,7 +72,10 @@ function checkNick(name){
 
 /* ================== UTILS ================== */
 function mention(uid){ return uid ? `[ты](tg://user?id=${uid})` : ""; }
-function splitText(t, m=3500){
+
+// Telegram limit ~4096, возьмём запас
+const TG_CHUNK = 3500;
+function splitText(t, m=TG_CHUNK){
   const r=[]; let b="";
   for(const l of t.split("\n")){
     if((b+l+"\n").length>m){ r.push(b); b=""; }
@@ -81,6 +84,21 @@ function splitText(t, m=3500){
   if(b) r.push(b);
   return r;
 }
+
+// чтобы не ловить flood — шлём по очереди и ждём
+async function sendChunks(ctxOrBot, chatId, text, extra = {}) {
+  const parts = splitText(text);
+  for (const p of parts) {
+    if (!p.trim()) continue;
+    if (ctxOrBot.reply) {
+      await ctxOrBot.reply(p, extra);
+    } else {
+      await ctxOrBot.telegram.sendMessage(chatId, p, extra);
+    }
+  }
+}
+
+// Генератор отчёта: оставляем в тексте только первые 80 строк, остальное — в файл при необходимости
 function report(title,names){
   const ban=[], rev=[];
   for(const n of names){
@@ -88,7 +106,8 @@ function report(title,names){
     if(s==="BAN") ban.push({n,r});
     else if(s==="REVIEW") rev.push({n,r});
   }
-  let out=`🔎 ${title}\nНайдено: ${names.length}\n\n`;
+
+  let out=`${title}\nНайдено: ${names.length}\n\n`;
   if(ban.length){
     out+=`❌ BAN (${ban.length}):\n`;
     ban.slice(0,80).forEach((x,i)=>out+=`${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
@@ -98,7 +117,22 @@ function report(title,names){
     out+=`⚠️ REVIEW (${rev.length}):\n`;
     rev.slice(0,80).forEach((x,i)=>out+=`${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
   }
-  return {out, ban:ban.length, rev:rev.length};
+  return {out, ban:ban.length, rev:rev.length, banList: ban, revList: rev};
+}
+
+function makeFullListText(title, names) {
+  // полный список: ник + статус/причина
+  const lines = [`${title}`, `Всего: ${names.length}`, ""];
+  for (const name of names) {
+    const [s, r] = checkNick(name);
+    if (s === "OK") continue; // можно убрать, если хочешь все ники
+    lines.push(`${s}\t${name}\t${r.join("; ")}`);
+  }
+  return lines.join("\n");
+}
+
+function bufferFromText(text) {
+  return Buffer.from(text, "utf-8");
 }
 
 /* ================== MINEFLAYER ================== */
@@ -111,21 +145,23 @@ const mc = mineflayer.createBot({
 
 const MC_PASSWORD = process.env.MC_PASSWORD;
 
+let loginSent = false;
+let registerSent = false;
+
 mc.on("messagestr", (msg) => {
   const m = msg.toLowerCase();
 
-  if (MC_PASSWORD && (
-      m.includes("login") ||
-      m.includes("авториз") ||
-      m.includes("/l")
-  )) {
+  // чтобы не спамить /login бесконечно
+  if (MC_PASSWORD && !loginSent && (m.includes("login") || m.includes("авториз") || m.includes("/l"))) {
+    loginSent = true;
     setTimeout(() => {
       mc.chat(`/login ${MC_PASSWORD}`);
       console.log("Sent /login");
     }, 1500);
   }
 
-  if (MC_PASSWORD && m.includes("register")) {
+  if (MC_PASSWORD && !registerSent && m.includes("register")) {
+    registerSent = true;
     setTimeout(() => {
       mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
       console.log("Sent /register");
@@ -158,18 +194,23 @@ function tabComplete(bot,text){
     c.write("tab_complete",{ text, assumeCommand:true, lookedAtBlock:null });
   });
 }
+
 function clean(s){ return s.replace(/[^A-Za-z0-9_]/g,""); }
+
 async function byPrefix(p){
   const r=await tabComplete(mc,`/msg ${p}`);
   return r.map(clean).filter(n=>n.length>=3 && n.length<=16);
 }
+
 function prefixes(){
   if(AUTO_PREFIXES) return AUTO_PREFIXES.split(",").map(x=>x.trim());
   const a=[];
   for(let i=97;i<=122;i++) a.push(String.fromCharCode(i));
   for(let i=0;i<=9;i++) a.push(String(i));
-  a.push("_"); return a;
+  a.push("_");
+  return a;
 }
+
 async function collect(ps){
   const all=new Set();
   for(const p of ps){
@@ -192,7 +233,7 @@ tg.command("tab", async c=>{
   const n=[...new Set(await byPrefix(a))];
   let t=`Tab /msg ${a}\nНайдено: ${n.length}\n\n`;
   n.slice(0,120).forEach((x,i)=>t+=`${i+1}) ${x}\n`);
-  splitText(t).forEach(p=>c.reply(p));
+  await sendChunks(c, null, t);
 });
 
 tg.command("tabcheck", async c=>{
@@ -200,14 +241,22 @@ tg.command("tabcheck", async c=>{
   if(!a) return c.reply("Пример: /tabcheck ager");
   const n=[...new Set(await byPrefix(a))];
   const r=report(`Tabcheck ${a}`,n);
-  splitText(r.out).forEach(p=>c.reply(p));
+  await sendChunks(c, null, r.out);
 });
 
 tg.command("scanall", async c=>{
-  c.reply("Сканирую...");
+  await c.reply("Сканирую...");
   const n=await collect(prefixes());
   const r=report("Full scan",n);
-  splitText(r.out).forEach(p=>c.reply(p));
+
+  // если очень много — шлём файлом
+  if (n.length >= 300) {
+    await sendChunks(c, null, r.out + `\n\n📄 Полный список отправляю файлом (слишком много для Telegram).`);
+    const full = makeFullListText("Full scan (FULL LIST)", n);
+    await c.replyWithDocument({ source: bufferFromText(full), filename: "scan_full.txt" });
+  } else {
+    await sendChunks(c, null, r.out);
+  }
 });
 
 /* ================== AUTO SCAN ================== */
@@ -216,20 +265,41 @@ async function autoScan(){
   if(!AUTO_SCAN) return;
   const n=await collect(prefixes());
   const r=report("Auto scan",n);
+
   if(r.ban===0 && r.rev===0){ lastKey=""; return; }
+
   const key=norm(r.out).slice(0,300);
   if(key===lastKey) return;
   lastKey=key;
-  const msg=`🚨 Найдены нарушения ${mention(PING_USER_ID)}\n\n`+r.out;
-  splitText(msg).forEach(p=>tg.telegram.sendMessage(CHAT_ID,p,{parse_mode:"Markdown"}));
+
+  const msg=`Найдены нарушения ${mention(PING_USER_ID)}\n\n`+r.out;
+
+  // авто-уведомления тоже лучше резать и слать по очереди
+  await sendChunks(tg, CHAT_ID, msg, { parse_mode: "Markdown" });
+
+  // и полный файл, если очень много
+  if (n.length >= 300) {
+    const full = makeFullListText("Auto scan (FULL LIST)", n);
+    await tg.telegram.sendDocument(
+      CHAT_ID,
+      { source: bufferFromText(full), filename: "auto_scan_full.txt" }
+    );
+  }
 }
 
-tg.launch();
-console.log("TG bot started");
+/* ======== Telegram launch fixes (409 & restart) ======== */
+async function startTelegram() {
+  // если когда-то был webhook — убираем
+  try { await tg.telegram.deleteWebhook({ drop_pending_updates: true }); } catch {}
+  await tg.launch({ dropPendingUpdates: true });
+  console.log("TG bot started");
+}
+startTelegram();
+
+process.once("SIGINT", () => tg.stop("SIGINT"));
+process.once("SIGTERM", () => tg.stop("SIGTERM"));
 
 if(AUTO_SCAN){
   setTimeout(autoScan,10000);
   setInterval(autoScan,AUTO_SCAN_MINUTES*60*1000);
-}
-
-
+    }
