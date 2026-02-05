@@ -11,7 +11,6 @@ const MC_HOST = process.env.MC_HOST;
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
 const MC_VERSION = process.env.MC_VERSION || undefined;
-const MC_PASSWORD = process.env.MC_PASSWORD;
 
 const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
@@ -26,68 +25,80 @@ if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
 let RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
 
 /* ================== NORMALIZE ================== */
-const leet = { "0":"o","1":"i","!":"i","3":"e","4":"a","5":"s","7":"t","@":"a","$":"s" };
-const cyr  = { "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","к":"k","м":"m","т":"t" };
+// доп. маппинг кириллицы (частые подмены)
+const cyr = { "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","к":"k","м":"m","т":"t" };
+
+const invisRe = new RegExp(RULES?.normalization?.strip_invisibles_regex || "[\\u200B-\\u200F\\u202A-\\u202E\\u2060\\uFEFF]", "g");
+const sepRe = new RegExp(RULES?.normalization?.separators_regex || "[\\s\\-_.:,;|/\\\\~`'\"^*+=()\\[\\]{}<>]+", "g");
+const leetMap = RULES?.normalization?.leet_map || { "0":"o","1":"i","3":"e","4":"a","5":"s","7":"t","@":"a","$":"s" };
+const collapseRepeats = RULES?.normalization?.collapse_repeats ?? true;
+const maxRepeat = RULES?.normalization?.max_repeat ?? 2;
 
 function stripColors(s=""){ return s.replace(/§./g,""); }
+
 function norm(s=""){
-  s = stripColors(s).toLowerCase();
-  s = [...s].map(ch => cyr[ch] || leet[ch] || ch).join("");
-  s = s.replace(/[\s_\-\.]+/g,"");
-  s = s.replace(/(.)\1{2,}/g,"$1$1");
+  s = stripColors(s);
+
+  if (RULES?.normalization?.lowercase ?? true) s = s.toLowerCase();
+
+  // убрать невидимые
+  s = s.replace(invisRe, "");
+
+  // маппинг символов
+  s = [...s].map(ch => cyr[ch] || leetMap[ch] || ch).join("");
+
+  // убрать разделители
+  s = s.replace(sepRe, "");
+
+  // схлопывание повторов
+  if (collapseRepeats) {
+    // оставить максимум maxRepeat повторов
+    const re = new RegExp(`(.)\\1{${maxRepeat},}`, "g");
+    const rep = "$1".repeat(maxRepeat);
+    s = s.replace(re, rep);
+  }
+
   return s;
 }
-function has1488(s){ return s.includes("1488") || (s.includes("14") && s.includes("88")); }
 
-function normArr(a){
-  return (a || []).map(x => norm(String(x))).filter(Boolean);
-}
-function rebuildRules(){
-  RULES = {
-    ...RULES,
-    whitelist_exact: normArr(RULES.whitelist_exact),
-    hard_ban_roots:  normArr(RULES.hard_ban_roots),
-    staff_roles:    normArr(RULES.staff_roles),
-    project_roots:  normArr(RULES.project_roots),
-    review_roots:   normArr(RULES.review_roots),
-  };
-}
-rebuildRules();
-
-/* ================== CHECKER ================== */
+/* ================== CHECKER (под rules.json) ================== */
 function checkNick(name){
   const n = norm(name);
 
-  // whitelist_exact уже нормализован
-  if ((RULES.whitelist_exact || []).includes(n)) return ["OK",["whitelist"]];
-
-  if (has1488(n)) return ["BAN",["extremism:1488"]];
-
-  const hard  = RULES.hard_ban_roots||[];
-  const staff = RULES.staff_roles||[];
-  const proj  = RULES.project_roots||[];
-  const review= RULES.review_roots||[];
-
-  const hardHit = hard.filter(w => n.includes(w));
-  if (hardHit.length) return ["BAN", hardHit.map(x=>"hard:"+x)];
-
-  const staffHit = staff.some(w => n.includes(w));
-  const projHit  = proj.some(w => n.includes(w));
-
-  if (staffHit && projHit) return ["BAN",["impersonation:project+role"]];
-  if (projHit && /\d{2,4}$/.test(n)) return ["BAN",["impersonation:project+digits"]];
+  // whitelist
+  const wl = new Set((RULES.whitelist_exact || []).map(norm));
+  if (wl.has(n)) return ["OK", ["whitelist"]];
 
   const reasons = [];
-  if (staffHit) reasons.push("impersonation:role");
-  const revHit = review.filter(w => n.includes(w));
-  reasons.push(...revHit.map(x=>"review:"+x));
 
-  if (reasons.length) return ["REVIEW", reasons];
-  return ["OK",[]];
+  // BAN rules
+  const banRules = (RULES.rules || []).filter(r => (r.action || "").toUpperCase() === "BAN");
+  for (const rule of banRules) {
+    const words = rule.words || [];
+    for (const w0 of words) {
+      const w = norm(String(w0));
+      if (!w) continue;
+      if (n.includes(w)) {
+        reasons.push(`${rule.reason || rule.id || "BAN"}:${w0}`);
+      }
+    }
+  }
+  if (reasons.length) return ["BAN", reasons];
+
+  // REVIEW words
+  const rev = [];
+  for (const w0 of (RULES.review || [])) {
+    const w = norm(String(w0));
+    if (!w) continue;
+    if (n.includes(w)) rev.push(`review:${w0}`);
+  }
+  if (rev.length) return ["REVIEW", rev];
+
+  return ["OK", []];
 }
 
-/* ================== UTILS ================== */
-function mention(uid){ return uid ? `(${uid})` : ""; } // без Markdown, чтобы не ломало ники с "_"
+/* ================== REPORT + TG SEND ================== */
+function mention(uid){ return uid ? `[ты](tg://user?id=${uid})` : ""; }
 
 function splitText(t, max = 3500){
   const parts=[]; let buf="";
@@ -110,30 +121,36 @@ async function sendChunksReply(ctx, text){
 
 async function sendChunksChat(bot, chatId, text){
   for(const part of splitText(text)){
-    if(part.trim()) await bot.telegram.sendMessage(chatId, part); // без parse_mode
+    if(part.trim()) await bot.telegram.sendMessage(chatId, part, { parse_mode:"Markdown" });
   }
 }
 
 function report(title, names){
   const ban=[], rev=[];
-  for(const n of names){
-    const [s,r]=checkNick(n);
-    if(s==="BAN") ban.push({n,r});
-    else if(s==="REVIEW") rev.push({n,r});
+  for(const nick of names){
+    const [s,r]=checkNick(nick);
+    if(s==="BAN") ban.push({nick,r});
+    else if(s==="REVIEW") rev.push({nick,r});
   }
 
   let out = `${title}\nНайдено: ${names.length}\n\n`;
 
   if(ban.length){
     out += `❌ BAN (${ban.length}):\n`;
-    ban.forEach((x,i)=> out += `${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
+    ban.forEach((x,i)=> out += `${i+1}) ${x.nick} → ${x.r.join("; ")}\n`);
     out += "\n";
   }
   if(rev.length){
     out += `⚠️ REVIEW (${rev.length}):\n`;
-    rev.forEach((x,i)=> out += `${i+1}) ${x.n} → ${x.r.join("; ")}\n`);
+    rev.forEach((x,i)=> out += `${i+1}) ${x.nick} → ${x.r.join("; ")}\n`);
+    out += "\n";
   }
-  return { out, ban:ban.length, rev:rev.length };
+
+  if (ban.length === 0 && rev.length === 0) {
+    out += "✅ Некорректных ников не найдено.\n";
+  }
+
+  return { out, ban: ban.length, rev: rev.length };
 }
 
 /* ================== MINEFLAYER ================== */
@@ -144,103 +161,97 @@ const mc = mineflayer.createBot({
   version: MC_VERSION
 });
 
+const MC_PASSWORD = process.env.MC_PASSWORD;
+
 let loginSent=false, registerSent=false;
 
+// статус для /status
+let mcReady=false;
+let mcOnline=false;
+let mcLastError="";
+
 mc.on("messagestr",(msg)=>{
-  const m = msg.toLowerCase();
+  const m = String(msg).toLowerCase();
+
+  // не спамим /login бесконечно
   if(MC_PASSWORD && !loginSent && (m.includes("login") || m.includes("авториз") || m.includes("/l"))){
     loginSent=true;
-    setTimeout(()=> mc.chat(`/login ${MC_PASSWORD}`),1500);
+    setTimeout(()=> {
+      mc.chat(`/login ${MC_PASSWORD}`);
+      console.log("Sent /login");
+    },1500);
   }
+
   if(MC_PASSWORD && !registerSent && m.includes("register")){
     registerSent=true;
-    setTimeout(()=> mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`),1500);
+    setTimeout(()=> {
+      mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
+      console.log("Sent /register");
+    },1500);
   }
 });
 
-let mcReady = false;
-
-mc.on("spawn", () => {
-  mcReady = true;
-  console.log("MC spawned (ready)");
+mc.on("login",()=>{
+  mcReady=true;
+  mcOnline=true;
+  mcLastError="";
+  console.log("MC logged in");
 });
 
-mc.on("end", () => {
-  mcReady = false;
-  console.log("MC end");
+mc.on("end",()=>{
+  mcReady=false;
+  mcOnline=false;
+  mcLastError="disconnected";
+  console.log("MC end/disconnected");
 });
 
-mc.on("kicked", (r) => {
-  mcReady = false;
+mc.on("kicked",(r)=>{
+  mcReady=false;
+  mcOnline=false;
+  mcLastError="kicked";
   console.log("MC kicked", r);
 });
 
-mc.on("error", (e) => console.log("MC error", e.message));
+mc.on("error",(e)=>{
+  mcLastError="error: " + String(e?.message || e);
+  console.log("MC error", e?.message || e);
+});
 
 /* ================== TAB COMPLETE ================== */
-function extractMatches(p){
-  const raw = p?.matches ?? p?.suggestions ?? [];
-  return raw.map(x => {
-    if (typeof x === "string") return x;
-    return x?.match || x?.text || x?.suggestion || "";
-  }).filter(Boolean);
-}
-
-async function tabComplete(bot, text){
-  if (typeof bot.tabComplete === "function") {
-    try {
-      const r = await bot.tabComplete(text);
-      return (r || []).map(String);
-    } catch {}
-  }
-
-  const c = bot._client;
-
-  const tryWrite = (payload) => {
-    try { c.write("tab_complete", payload); return true; }
-    catch { return false; }
-  };
-
-  return new Promise((res, rej) => {
-    const to = setTimeout(() => { cleanup(); rej(new Error("tab_complete timeout")); }, 2500);
-
-    const on = (p) => {
+function tabComplete(bot,text){
+  return new Promise((res,rej)=>{
+    const c=bot._client;
+    const to=setTimeout(()=>{ cleanup(); rej("timeout"); },2000);
+    const on=(p)=>{
       cleanup();
-      res(extractMatches(p));
+      const m=p?.matches?.map(x=>typeof x==="string"?x:(x.match||x.text||""))||[];
+      res(m);
     };
-
     function cleanup(){
       clearTimeout(to);
-      c.removeListener("tab_complete", on);
-      c.removeListener("tab_complete_response", on);
+      c.removeListener("tab_complete",on);
+      c.removeListener("tab_complete_response",on);
     }
-
-    c.once("tab_complete", on);
-    c.once("tab_complete_response", on);
-
-    const payloads = [
-      { text, assumeCommand: true, lookedAtBlock: null },
-      { text, assumeCommand: false, lookedAtBlock: null },
-      { text, assumeCommand: true },
-      { text },
-    ];
-
-    let ok = false;
-    for (const p of payloads) {
-      if (tryWrite(p)) { ok = true; break; }
-    }
-    if (!ok) {
-      cleanup();
-      rej(new Error("cannot write tab_complete packet"));
-    }
+    c.once("tab_complete",on);
+    c.once("tab_complete_response",on);
+    c.write("tab_complete",{ text, assumeCommand:true, lookedAtBlock:null });
   });
 }
 
 function clean(s){ return String(s).replace(/[^A-Za-z0-9_]/g,""); }
 
-async function byPrefix(p){
-  const r = await tabComplete(mc, `/msg ${p}`);
-  return r.map(clean).filter(n => n.length>=3 && n.length<=16);
+async function byPrefix(prefix){
+  const raw = await tabComplete(mc, `/msg ${prefix}`);
+  const pref = clean(prefix).toLowerCase();
+
+  const out = [];
+  for (const x of raw) {
+    const n = clean(x);
+    if (!n) continue;
+    // главное: фильтруем по префиксу (иначе будет “рандом”)
+    if (n.toLowerCase().startsWith(pref)) out.push(n);
+  }
+  return out.filter(n => n.length>=3 && n.length<=16);
 }
 
 function prefixes(){
@@ -255,10 +266,8 @@ function prefixes(){
 async function collect(ps){
   const all=new Set();
   for(const p of ps){
-    if(!mcReady) throw new Error("MC not ready");
-    try{
-      (await byPrefix(p)).forEach(n=>all.add(n));
-    }catch{}
+    if(!mcReady) throw "MC not ready";
+    try{ (await byPrefix(p)).forEach(n=>all.add(n)); }catch{}
     await new Promise(r=>setTimeout(r,SCAN_DELAY_MS));
   }
   return [...all];
@@ -267,83 +276,17 @@ async function collect(ps){
 /* ================== TELEGRAM ================== */
 const tg = new Telegraf(BOT_TOKEN);
 
-tg.start(c=>c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/myid"));
+tg.start(c=>c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/tabcheak <префикс>\n/scanall\n/myid\n/status"));
+
 tg.command("myid",c=>c.reply(`user_id: ${c.from.id}\nchat_id: ${c.chat.id}`));
 
+tg.command("status", async (c) => {
+  let s = "❌ не в сети / не готов";
+  if (mcOnline && mcReady) s = "✅ на сервере (готов)";
+  else if (mcOnline && !mcReady) s = "🟡 подключён, но ещё не готов";
+  const extra = mcLastError ? `\nПричина: ${mcLastError}` : "";
+  await c.reply(`Статус MC-бота: ${s}\nНик: ${MC_USER}${extra}`);
+});
+
 tg.command("tab", async c=>{
-  const a=c.message.text.split(" ").slice(1).join(" ").trim();
-  if(!a) return c.reply("Пример: /tab ager");
-  const n=[...new Set(await byPrefix(a))];
-  let t=`Tab /msg ${a}\nНайдено: ${n.length}\n\n`;
-  n.slice(0,120).forEach((x,i)=>t+=`${i+1}) ${x}\n`);
-  await sendChunksReply(c,t);
-});
-
-async function doTabCheck(c, prefix){
-  const n=[...new Set(await byPrefix(prefix))];
-  const r=report(`Tabcheck ${prefix}`,n);
-  await sendChunksReply(c,r.out);
-}
-
-tg.command("tabcheck", async c=>{
-  const a=c.message.text.split(" ").slice(1).join(" ").trim();
-  if(!a) return c.reply("Пример: /tabcheck ager");
-  await doTabCheck(c,a);
-});
-
-// алиас под твою частую опечатку
-tg.command("tabcheak", async c=>{
-  const a=c.message.text.split(" ").slice(1).join(" ").trim();
-  if(!a) return c.reply("Пример: /tabcheak ager (алиас /tabcheck)");
-  await doTabCheck(c,a);
-});
-
-tg.command("scanall", async c=>{
-  await c.reply("Сканирую...");
-  try{
-    const n=await collect(prefixes());
-    const r=report("Full scan",n);
-    await sendChunksReply(c,r.out);
-  }catch(e){
-    await c.reply(`Ошибка: ${e?.message || e}`);
-  }
-});
-
-/* ================== AUTO SCAN ================== */
-let lastKey="";
-
-async function autoScan(){
-  if(!AUTO_SCAN) return;
-  try{
-    const n = await collect(prefixes());
-    const r = report("Auto scan", n);
-
-    if(r.ban===0 && r.rev===0){ lastKey=""; return; }
-
-    const key = norm(r.out).slice(0,300);
-    if(key===lastKey) return;
-    lastKey = key;
-
-    const msg = `Найдены нарушения ${mention(PING_USER_ID)}\n\n` + r.out;
-    if (CHAT_ID) await sendChunksChat(tg, CHAT_ID, msg);
-  }catch(e){
-    console.log("AutoScan error:", e?.message || e);
-  }
-}
-
-/* ======== TG launch (409 fix) ======== */
-async function startTG(){
-  try{ await tg.telegram.deleteWebhook({ drop_pending_updates:true }); }catch{}
-  await tg.launch({ dropPendingUpdates:true });
-  console.log("TG bot started");
-}
-startTG();
-
-process.once("SIGINT",()=>tg.stop("SIGINT"));
-process.once("SIGTERM",()=>tg.stop("SIGTERM"));
-
-if(AUTO_SCAN){
-  setTimeout(autoScan,10000);
-  setInterval(autoScan, AUTO_SCAN_MINUTES*60*1000);
-}
-```0
+  const a=c.message.text.split(" ").slice(1).join(" ").
