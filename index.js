@@ -10,13 +10,22 @@ const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID)
 const MC_HOST = process.env.MC_HOST;
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
-const MC_VERSION = process.env.MC_VERSION || undefined;
+
+/**
+ * ВАЖНО: если MC_VERSION не задан, mineflayer делает авто-детект протокола.
+ * На многих серверах/прокси это даёт краш protodef: PartialReadError (particles/f32).
+ * Для Agera PvP ставь 1.8.9.
+ */
+const MC_VERSION = process.env.MC_VERSION || "1.8.9";
+
 const MC_PASSWORD = process.env.MC_PASSWORD;
 
 const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim();
+
+const READY_AFTER_MS = Number(process.env.READY_AFTER_MS || 1500);
 
 if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
   throw new Error("Нужны BOT_TOKEN, MC_HOST, MC_USER");
@@ -107,8 +116,10 @@ async function sendChunksReply(ctx, text) {
 }
 
 async function sendChunksChat(bot, chatId, text) {
-  for (const p of splitText(text)) if (p.trim())
+  for (const p of splitText(text)) {
+    if (!p.trim()) continue;
     await bot.telegram.sendMessage(chatId, p, { parse_mode: "Markdown" });
+  }
 }
 
 function report(title, names) {
@@ -145,15 +156,31 @@ let mcLastError = "";
 let loginSent = false;
 let registerSent = false;
 let reconnectTimer = null;
+let reconnecting = false;
 
 function connectMC() {
+  if (reconnecting) return;
+  reconnecting = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   if (mc) {
-    try { mc.end(); } catch {}
+    try { mc.quit?.("reconnect"); } catch {}
+    try { mc.end?.(); } catch {}
+    try { mc._client?.end?.(); } catch {}
     mc = null;
   }
 
   mcReady = false;
   mcOnline = false;
+  mcLastError = "";
+  loginSent = false;
+  registerSent = false;
+
+  console.log(`[MC] connect ${MC_HOST}:${MC_PORT} user=${MC_USER} v=${MC_VERSION}`);
 
   mc = mineflayer.createBot({
     host: MC_HOST,
@@ -166,41 +193,64 @@ function connectMC() {
     mcOnline = true;
     mcReady = false;
     mcLastError = "";
-    console.log("MC login");
+    console.log("[MC] login");
   });
 
   mc.on("spawn", () => {
-    mcReady = true;
-    console.log("MC spawn (READY)");
+    console.log("[MC] spawn");
+    // не ставим ready мгновенно — даём прогрузиться миру
+    setTimeout(() => {
+      if (mc && mc.entity) {
+        mcReady = true;
+        console.log("[MC] READY");
+      } else {
+        mcReady = false;
+        console.log("[MC] spawn but no entity -> reconnect");
+        scheduleReconnect("no-entity");
+      }
+    }, READY_AFTER_MS);
   });
 
   mc.on("messagestr", (msg) => {
     const m = String(msg).toLowerCase();
     if (MC_PASSWORD && !loginSent && m.includes("login")) {
       loginSent = true;
-      setTimeout(()=> mc.chat(`/login ${MC_PASSWORD}`), 1500);
+      setTimeout(() => mc?.chat?.(`/login ${MC_PASSWORD}`), 1500);
     }
     if (MC_PASSWORD && !registerSent && m.includes("register")) {
       registerSent = true;
-      setTimeout(()=> mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
+      setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
     }
   });
 
-  function onDisconnect(reason) {
+  const onDisconnect = (reason) => {
     mcReady = false;
     mcOnline = false;
     mcLastError = reason;
     loginSent = false;
     registerSent = false;
-    console.log("MC disconnected:", reason);
 
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectMC, 5000);
-  }
+    console.log("[MC] disconnected:", reason);
+    scheduleReconnect(reason);
+  };
 
   mc.on("end", () => onDisconnect("end"));
-  mc.on("kicked", r => onDisconnect("kicked: " + String(r)));
-  mc.on("error", e => onDisconnect("error: " + String(e?.message || e)));
+  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
+  mc.on("error", (e) => {
+    const msg = String(e?.message || e);
+    onDisconnect("error: " + msg);
+  });
+
+  // снимаем флаг коннекта чуть позже (чтобы не было двойных connectMC)
+  setTimeout(() => { reconnecting = false; }, 1200);
+};
+
+function scheduleReconnect(reason) {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectMC();
+  }, 5000);
 }
 
 connectMC();
@@ -210,36 +260,54 @@ function clean(s) { return String(s).replace(/[^A-Za-z0-9_]/g, ""); }
 
 function tabComplete(bot, text) {
   return new Promise((res, rej) => {
+    if (!bot?._client) return rej(new Error("CLIENT_NOT_READY"));
+
     const c = bot._client;
-    const to = setTimeout(()=>{ cleanup(); rej(); }, 2000);
-    const on = (p) => {
+
+    const timeout = setTimeout(() => {
       cleanup();
-      res(p?.matches?.map(x=> typeof x==="string"?x:(x.text||x.match||"")) || []);
+      rej(new Error("TAB_TIMEOUT"));
+    }, 2500);
+
+    const onPacket = (p) => {
+      cleanup();
+      const matches = p?.matches || [];
+      const out = matches.map(x => typeof x === "string" ? x : (x.text || x.match || ""));
+      res(out);
     };
+
     function cleanup() {
-      clearTimeout(to);
-      c.removeListener("tab_complete", on);
-      c.removeListener("tab_complete_response", on);
+      clearTimeout(timeout);
+      try { c.removeListener("tab_complete", onPacket); } catch {}
+      try { c.removeListener("tab_complete_response", onPacket); } catch {}
     }
-    c.once("tab_complete", on);
-    c.once("tab_complete_response", on);
-    c.write("tab_complete", { text, assumeCommand:true, lookedAtBlock:null });
+
+    c.once("tab_complete", onPacket);
+    c.once("tab_complete_response", onPacket);
+
+    try {
+      // для 1.8.9 lookedAtBlock может быть null, но иногда лучше объект
+      c.write("tab_complete", { text, assumeCommand: true, lookedAtBlock: { x: 0, y: 0, z: 0 } });
+    } catch (e) {
+      cleanup();
+      rej(e);
+    }
   });
 }
 
 async function byPrefix(prefix) {
   const raw = await tabComplete(mc, `/msg ${prefix}`);
   const pref = clean(prefix).toLowerCase();
-  return raw.map(clean).filter(n =>
-    n.length>=3 && n.length<=16 && n.toLowerCase().startsWith(pref)
-  );
+  return raw
+    .map(clean)
+    .filter(n => n.length >= 3 && n.length <= 16 && n.toLowerCase().startsWith(pref));
 }
 
 function prefixes() {
   if (AUTO_PREFIXES) return AUTO_PREFIXES.split(",").map(x=>x.trim()).filter(Boolean);
-  const a=[];
-  for(let i=97;i<=122;i++) a.push(String.fromCharCode(i));
-  for(let i=0;i<=9;i++) a.push(String(i));
+  const a = [];
+  for (let i = 97; i <= 122; i++) a.push(String.fromCharCode(i));
+  for (let i = 0; i <= 9; i++) a.push(String(i));
   a.push("_");
   return a;
 }
@@ -249,8 +317,8 @@ async function collect(ps) {
   const all = new Set();
   for (const p of ps) {
     if (!mcReady) throw new Error("MC_NOT_READY");
-    try { (await byPrefix(p)).forEach(n=>all.add(n)); } catch {}
-    await new Promise(r=>setTimeout(r, SCAN_DELAY_MS));
+    try { (await byPrefix(p)).forEach(n => all.add(n)); } catch {}
+    await new Promise(r => setTimeout(r, SCAN_DELAY_MS));
   }
   return [...all];
 }
@@ -258,47 +326,52 @@ async function collect(ps) {
 /* ================== TELEGRAM ================== */
 const tg = new Telegraf(BOT_TOKEN);
 
-tg.start(c=>c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/status"));
+tg.start(c => c.reply("Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/status"));
 
-tg.command("status", c=>{
+tg.command("status", c => {
   let s = "❌ не в сети";
-  if (mcOnline && mcReady) s="✅ на сервере (готов)";
-  else if (mcOnline) s="🟡 подключён, но не готов";
-  c.reply(`MC статус: ${s}\nНик: ${MC_USER}\n${mcLastError||""}`);
+  if (mcOnline && mcReady) s = "✅ на сервере (готов)";
+  else if (mcOnline) s = "🟡 подключён, но не готов";
+  c.reply(`MC статус: ${s}\nНик: ${MC_USER}\nВерсия: ${MC_VERSION}\n${mcLastError || ""}`);
 });
 
-tg.command("tab", async c=>{
+tg.command("tab", async c => {
   if (!mcReady) return c.reply("MC не готов");
-  const a=c.message.text.split(" ").slice(1).join(" ");
-  const n=[...new Set(await byPrefix(a))];
-  let t=`Tab ${a}\nНайдено: ${n.length}\n\n`;
+  const a = c.message.text.split(" ").slice(1).join(" ");
+  const n = [...new Set(await byPrefix(a))];
+  let t = `Tab ${a}\nНайдено: ${n.length}\n\n`;
   n.forEach((x,i)=>t+=`${i+1}) ${x}\n`);
-  sendChunksReply(c,t);
+  sendChunksReply(c, t);
 });
 
-tg.command("tabcheck", async c=>{
+tg.command("tabcheck", async c => {
   if (!mcReady) return c.reply("MC не готов");
-  const a=c.message.text.split(" ").slice(1).join(" ");
-  const n=await byPrefix(a);
+  const a = c.message.text.split(" ").slice(1).join(" ");
+  const n = await byPrefix(a);
   sendChunksReply(c, report(`Tabcheck ${a}`, n).out);
 });
 
-tg.command("scanall", async c=>{
+tg.command("scanall", async c => {
   if (!mcReady) return c.reply("MC не готов");
   c.reply("Сканирую...");
-  const n=await collect(prefixes());
+  const n = await collect(prefixes());
   sendChunksReply(c, report("Full scan", n).out);
 });
 
-tg.launch({ dropPendingUpdates:true });
+tg.launch({ dropPendingUpdates: true });
 console.log("TG bot started");
 
 /* ================== AUTO SCAN ================== */
 if (AUTO_SCAN) {
-  setInterval(async ()=>{
-    if (!mcReady) return;
-    const n=await collect(prefixes());
-    const r=report("Auto scan", n);
-    if (r.ban||r.rev) sendChunksChat(tg, CHAT_ID, r.out);
-  }, AUTO_SCAN_MINUTES*60*1000);
+  setInterval(async () => {
+    try {
+      if (!mcReady) return;
+      if (!CHAT_ID) return; // иначе tg.telegram.sendMessage упадёт
+      const n = await collect(prefixes());
+      const r = report("Auto scan", n);
+      if (r.ban || r.rev) await sendChunksChat(tg, CHAT_ID, r.out);
+    } catch (e) {
+      console.log("[AUTO_SCAN] error:", String(e?.message || e));
+    }
+  }, AUTO_SCAN_MINUTES * 60 * 1000);
 }
