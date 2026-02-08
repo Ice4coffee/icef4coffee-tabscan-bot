@@ -27,14 +27,14 @@
         "hui","hyi","xuy","xyu","xue",
         "pizd","piz","pis","piss",
         "bly","blya","blyat","blya",
-        "eb","ebal","eby","ebalo","ebanat",
+        "ebal","eby","ebalo","ebanat",
         "yeb","yeban","yebal","yebat",
-        "zalup",
-        "gandon","gand0n",
+        "zalup","bebra","bebrik",
+        "gandon","gand0n","eblan",
         "pezduk","pezduck",
-        "piska",
-        "sosi","soso","coco",
-        "govn","govnoed",
+        "piska","gey","fuck",
+        "sosi",
+        "govn","govnoed","g0vn","g0vn0ed",
         "kotakbas","kotokbas"
       ]
     },
@@ -62,7 +62,7 @@
       "words": [
         "jopa","jopki",
         "popa","popka","popki",
-        "penis","anus",
+        "penis","anus","pesun",
         "dildo",
         "porn","porno","sex",
         "cock","dick","pussy","cunt",
@@ -108,7 +108,7 @@
 
         "rise","wurst",
         "impact","meteor",
-        "sigma","aristois",
+        "aristois",
         "liquidbounce",
         "future","inertia",
         "kami","rusherhack",
@@ -128,7 +128,7 @@
       "reason": "Маскировка под персонал",
       "words": [
         "owner","admin","helper",
-        "moder","mod",
+        "moder",
         "staff","support",
         "dev","developer",
         "administrator","moderator"
@@ -150,16 +150,18 @@
   "review": [
     "niger",
     "svo",
-    "sexy",
+    "CBO",
+    "svo",
+    "ZOV",
     "sex",
-    "zxc",
     "nagibator",
-    "blood",
     "drug"
   ],
 
   "whitelist_exact": [
     "maktraher",
     "picun"
+    "gleb"
   ]
 }
+
