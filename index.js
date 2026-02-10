@@ -45,12 +45,52 @@ process.on("uncaughtException", (e) => console.error("🔥 uncaughtException:", 
 process.on("unhandledRejection", (e) => console.error("🔥 unhandledRejection:", e));
 
 process.once("SIGINT", () => {
-  try { tg.stop("SIGINT"); } catch {}
-  try { bot?.end(); } catch {}
+  try {
+    tg.stop("SIGINT");
+  } catch {}
+  try {
+    bot?.end();
+  } catch {}
 });
 process.once("SIGTERM", () => {
-  try { tg.stop("SIGTERM"); } catch {}
-  try { bot?.end(); } catch {}
+  try {
+    tg.stop("SIGTERM");
+  } catch {}
+  try {
+    bot?.end();
+  } catch {}
+});
+
+/* ================== SAFE TG WRAPPERS ================== */
+async function safeAnswerCbQuery(ctx, text) {
+  try {
+    await ctx.answerCbQuery(text);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.includes("query is too old") || msg.includes("timeout expired")) return;
+    console.log("⚠️ answerCbQuery error:", msg);
+  }
+}
+
+async function safeEditMessageText(ctx, text, extra) {
+  try {
+    if (!ctx?.callbackQuery?.message) {
+      return ctx.reply(text, extra);
+    }
+    return await ctx.editMessageText(text, extra);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.includes("message is not modified")) return;
+    if (msg.includes("message can't be edited") || msg.includes("MESSAGE_ID_INVALID")) {
+      return ctx.reply(text, extra);
+    }
+    console.log("⚠️ editMessageText error:", msg);
+  }
+}
+
+/* Чтобы бот не падал на ошибках внутри обработчиков */
+tg.catch((err) => {
+  console.log("⚠️ Telegraf handler error:", err?.message || err);
 });
 
 /* ================== RULES LOADER ================== */
@@ -59,7 +99,6 @@ function loadRules() {
     return JSON.parse(fs.readFileSync("rules.json", "utf8"));
   } catch (e) {
     console.error("❌ Не могу прочитать rules.json:", e?.message || e);
-    // безопасный дефолт под твой формат v2
     return {
       version: 2,
       normalization: {
@@ -86,21 +125,23 @@ function normalizeByRules(nick) {
   if (norm.lowercase) s = s.toLowerCase();
 
   if (norm.strip_invisibles_regex) {
-    try { s = s.replace(new RegExp(norm.strip_invisibles_regex, "g"), ""); } catch {}
+    try {
+      s = s.replace(new RegExp(norm.strip_invisibles_regex, "g"), "");
+    } catch {}
   }
 
   if (norm.separators_regex) {
-    try { s = s.replace(new RegExp(norm.separators_regex, "g"), ""); } catch {}
+    try {
+      s = s.replace(new RegExp(norm.separators_regex, "g"), "");
+    } catch {}
   }
 
-  // leet replacements
   if (norm.leet_map) {
     for (const [k, v] of Object.entries(norm.leet_map)) {
       s = s.split(k).join(v);
     }
   }
 
-  // collapse repeats
   if (norm.collapse_repeats) {
     const max = Number(norm.max_repeat || 2);
     s = s.replace(/(.)\1+/g, (_m, c) => String(c).repeat(Math.max(1, Math.min(5, max))));
@@ -113,22 +154,23 @@ function checkNickByRules(nick) {
   const raw = String(nick);
   const norm = normalizeByRules(raw);
 
-  // whitelist_exact (в твоём файле — уже нормализованные строки)
   if ((RULES.whitelist_exact || []).includes(norm)) {
     return { verdict: "OK", reason: "WHITELIST", rule: "WHITELIST" };
   }
 
-  // BAN rules
   for (const rule of RULES.rules || []) {
     const words = rule.words || [];
     for (const w of words) {
       if (w && norm.includes(String(w).toLowerCase())) {
-        return { verdict: String(rule.action || "BAN").toUpperCase(), reason: rule.reason || "Правило", rule: rule.id || "RULE" };
+        return {
+          verdict: String(rule.action || "BAN").toUpperCase(),
+          reason: rule.reason || "Правило",
+          rule: rule.id || "RULE"
+        };
       }
     }
   }
 
-  // REVIEW list
   for (const w of RULES.review || []) {
     if (!w) continue;
     if (norm.includes(String(w).toLowerCase())) {
@@ -149,9 +191,7 @@ if (GEMINI_API_KEY) {
 }
 
 async function geminiReviewNick({ nick }) {
-  if (!geminiModel) {
-    return { decision: "REVIEW", confidence: 0, reason: "AI выключен (нет GEMINI_API_KEY)" };
-  }
+  if (!geminiModel) return { decision: "REVIEW", confidence: 0, reason: "AI выключен (нет GEMINI_API_KEY)" };
 
   const normalized = normalizeByRules(nick);
 
@@ -186,7 +226,7 @@ OK — если чисто.
     }
 
     return { decision, confidence, reason };
-  } catch (e) {
+  } catch {
     return { decision: "REVIEW", confidence: 0, reason: "Ошибка Gemini" };
   }
 }
@@ -214,7 +254,7 @@ function createMcBot() {
     hideErrors: true
   });
 
-  // FIX sourceStart 8192: игнорим plugin_message (часто огромные)
+  // FIX sourceStart 8192: игнорим plugin_message
   bot._client?.on("packet", (_data, meta) => {
     if (meta?.name === "plugin_message") return;
   });
@@ -252,7 +292,6 @@ function createMcBot() {
 async function getPlayersTabComplete() {
   if (!bot) return [];
   return new Promise((resolve) => {
-    // На 1.8.9 чаще всего работает /msg (иногда /tell или /w)
     bot.tabComplete("/msg ", (err, results) => {
       if (err || !Array.isArray(results)) return resolve([]);
 
@@ -289,14 +328,9 @@ async function scanAll({ useAI = true } = {}) {
   try {
     const players = await getOnlinePlayersSmart();
 
-    const res = {
-      total: players.length,
-      ban: [],
-      review: [],
-      ok: []
-    };
+    const res = { total: players.length, ban: [], review: [], ok: [] };
 
-    // лимит AI на один скан, чтобы не спамить API
+    // лимит AI на один скан
     let aiBudget = 25;
 
     for (const nick of players) {
@@ -345,10 +379,13 @@ function formatScan(res) {
   lines.push(`⚠️ REVIEW (${res.review.length}):`);
   lines.push(res.review.length ? res.review.slice(0, 50).join("\n") : "—");
 
-  // OK не спамим огромным списком — покажем первые 30
   lines.push("");
   lines.push(`✅ OK (${res.ok.length}):`);
-  lines.push(res.ok.length ? res.ok.slice(0, 30).join(", ") + (res.ok.length > 30 ? ` …(+${res.ok.length - 30})` : "") : "—");
+  lines.push(
+    res.ok.length
+      ? res.ok.slice(0, 30).join(", ") + (res.ok.length > 30 ? ` …(+${res.ok.length - 30})` : "")
+      : "—"
+  );
 
   return lines.join("\n").slice(0, 3900);
 }
@@ -393,16 +430,11 @@ function mainKeyboard() {
 function formatStatusText() {
   const st = mcInGame() ? "✅ в игре" : "❌ не в сети";
   const ai = geminiModel ? "✅ включён" : "❌ выключен";
-  return (
-    `MC статус: ${st}\n` +
-    `Ник: ${MC_USER}\n` +
-    `Версия: ${MC_VERSION}\n` +
-    `AI (Gemini): ${ai}`
-  );
+  return `MC статус: ${st}\nНик: ${MC_USER}\nВерсия: ${MC_VERSION}\nAI (Gemini): ${ai}`;
 }
 
 // состояние для ручной AI проверки
-const awaitingAiNick = new Map(); // key: chatId -> userId
+const awaitingAiNick = new Map(); // chatId -> userId
 
 tg.start((ctx) => {
   ctx.reply("🤖 TabScan Bot\n\nВыбери действие:", mainKeyboard());
@@ -412,41 +444,42 @@ tg.command("status", (ctx) => ctx.reply(formatStatusText(), mainKeyboard()));
 tg.command("scanall", async (ctx) => {
   const msg = await ctx.reply("🔎 Сканирую…");
   const r = await scanAll({ useAI: true });
-  if (!r) return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "❌ MC не в игре", mainKeyboard());
-  return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, formatScan(r), mainKeyboard());
+  if (!r) return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "❌ MC не в игре");
+  return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, formatScan(r));
 });
 
 tg.action("status", async (ctx) => {
-  await ctx.answerCbQuery();
-  return ctx.editMessageText(formatStatusText(), mainKeyboard());
+  await safeAnswerCbQuery(ctx);
+  return safeEditMessageText(ctx, formatStatusText(), mainKeyboard());
 });
 
 tg.action("reload_rules", async (ctx) => {
   RULES = loadRules();
-  await ctx.answerCbQuery("rules.json обновлён");
-  return ctx.editMessageText("✅ rules.json перезагружен", mainKeyboard());
+  await safeAnswerCbQuery(ctx, "rules.json обновлён");
+  return safeEditMessageText(ctx, "✅ rules.json перезагружен", mainKeyboard());
 });
 
 tg.action("scan_all", async (ctx) => {
-  await ctx.answerCbQuery("Сканирую…");
+  await safeAnswerCbQuery(ctx, "Сканирую…");
   const r = await scanAll({ useAI: true });
-  if (!r) return ctx.editMessageText("❌ MC не в игре", mainKeyboard());
-  return ctx.editMessageText(formatScan(r), mainKeyboard());
+  if (!r) return safeEditMessageText(ctx, "❌ MC не в игре", mainKeyboard());
+  return safeEditMessageText(ctx, formatScan(r), mainKeyboard());
 });
 
 tg.action("ai_check", async (ctx) => {
-  await ctx.answerCbQuery();
+  await safeAnswerCbQuery(ctx);
   awaitingAiNick.set(ctx.chat.id, ctx.from.id);
-  return ctx.editMessageText(
-    "🤖 Отправь ник одним сообщением (только ник).\n\nНапример: `xX_Nick_123_Xx`",
+  return safeEditMessageText(
+    ctx,
+    "🤖 Отправь ник одним сообщением (только ник).\n\nПример: xX_Nick_123_Xx",
     Markup.inlineKeyboard([[Markup.button.callback("⬅️ Назад", "back")]])
   );
 });
 
 tg.action("back", async (ctx) => {
-  await ctx.answerCbQuery();
+  await safeAnswerCbQuery(ctx);
   awaitingAiNick.delete(ctx.chat.id);
-  return ctx.editMessageText("🤖 TabScan Bot\n\nВыбери действие:", mainKeyboard());
+  return safeEditMessageText(ctx, "🤖 TabScan Bot\n\nВыбери действие:", mainKeyboard());
 });
 
 tg.on("text", async (ctx) => {
@@ -460,10 +493,7 @@ tg.on("text", async (ctx) => {
     return ctx.reply("❌ Пришли один ник (короткий).", mainKeyboard());
   }
 
-  // сначала правила
   const ruleRes = checkNickByRules(nick);
-
-  // затем AI (если включен)
   const ai = await geminiReviewNick({ nick });
 
   const text =
