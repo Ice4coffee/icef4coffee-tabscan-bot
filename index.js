@@ -1,10 +1,10 @@
 import fs from "fs";
 import mineflayer from "mineflayer";
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf } from "telegraf";
 
 /* ================== ENV ================== */
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHAT_ID = process.env.CHAT_ID; // можно оставить пустым — тогда ответы в тот чат, где команда
+const CHAT_ID = process.env.CHAT_ID; // можно пустым — тогда /scan отвечает в чат, где вызвали
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
 
 const MC_HOST = process.env.MC_HOST;
@@ -16,58 +16,53 @@ const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 
-const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim(); // опционально
-const LOGIN_CMD = (process.env.MC_LOGIN_CMD || "/login PASSWORD").trim(); // если нужно
+const LOGIN_CMD = (process.env.MC_LOGIN_CMD || "").trim(); // например: "/login password"
 const WAIT_AFTER_SPAWN_MS = Number(process.env.WAIT_AFTER_SPAWN_MS || 3000);
 
 if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
-  throw new Error("Нужны BOT_TOKEN, MC_HOST, MC_USER (и желательно CHAT_ID)");
+  throw new Error("Нужны BOT_TOKEN, MC_HOST, MC_USER");
 }
 
 /* ================== RULES ================== */
 function loadRules() {
   try {
-    const raw = fs.readFileSync("rules.json", "utf8");
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync("rules.json", "utf8"));
   } catch (e) {
     console.error("❌ Не могу прочитать rules.json:", e?.message || e);
     return { ban: [], review: [], normalize: {} };
   }
 }
 let RULES = loadRules();
-
-function safeReloadRules() {
+function reloadRules() {
   RULES = loadRules();
   console.log("✅ rules.json перезагружен");
 }
 
-/* ================== GLOBAL STATE ================== */
+/* ================== HELPERS ================== */
 const tg = new Telegraf(BOT_TOKEN);
 
 let bot = null;
+
 let mcState = {
-  online: false,
+  online: false, // “соединение есть”
   username: MC_USER,
   version: MC_VERSION,
   lastError: null,
   spawnedAt: null,
   connecting: false,
-  lastDisconnectAt: null,
 };
 
 let scanLock = false;
 let autoScanTimer = null;
 
-function isMcOnline() {
-  // Самый честный признак “в игре”: есть entity
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isMcInGame() {
+  // честный признак “в игре”: есть entity
   return !!bot?.player?.entity;
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/* ================== SAFETY: НЕ ДАЁМ ПРОЦЕССУ УМЕРЕТЬ ================== */
+/* ================== SAFETY: не даём процессу умирать ================== */
 process.on("uncaughtException", (err) => {
   console.error("🔥 uncaughtException:", err?.stack || err);
   mcState.lastError = String(err?.message || err);
@@ -82,21 +77,15 @@ process.on("unhandledRejection", (err) => {
 function normalizeNick(nick) {
   if (!nick) return "";
   let s = String(nick);
-
-  // базовая нормализация (убираем пробелы/нулевую ширину/цвета и т.п.)
   s = s.replace(/\s+/g, "");
   s = s.replace(/[\u200B-\u200D\uFEFF]/g, "");
 
-  // если у тебя в rules.json есть normalize map — применим
   const map = RULES?.normalize || {};
   for (const [from, to] of Object.entries(map)) {
     try {
       s = s.replace(new RegExp(from, "gi"), to);
-    } catch {
-      // если from не валидный regex — просто пропускаем
-    }
+    } catch {}
   }
-
   return s.toLowerCase();
 }
 
@@ -108,7 +97,6 @@ function matchAny(patterns, text) {
       const re = new RegExp(p, "i");
       if (re.test(text)) return true;
     } catch {
-      // если p не regex, пробуем как подстроку
       if (String(text).toLowerCase().includes(String(p).toLowerCase())) return true;
     }
   }
@@ -125,14 +113,10 @@ function checkNick(nick) {
   const isBan = matchAny(ban, raw) || matchAny(ban, norm);
   const isReview = !isBan && (matchAny(review, raw) || matchAny(review, norm));
 
-  return {
-    nick: raw,
-    norm,
-    verdict: isBan ? "BAN" : isReview ? "REVIEW" : "OK",
-  };
+  return { nick: raw, norm, verdict: isBan ? "BAN" : isReview ? "REVIEW" : "OK" };
 }
 
-/* ================== MC BOT CREATE / CONNECT ================== */
+/* ================== MC BOT ================== */
 function createMcBot() {
   if (mcState.connecting) return;
   mcState.connecting = true;
@@ -151,24 +135,18 @@ function createMcBot() {
     host: MC_HOST,
     port: MC_PORT,
     username: MC_USER,
-    version: "1.8.9",        // принудительно 1.8.9
+    version: "1.8.9", // фиксируем 1.8.9
     hideErrors: true,
-    // viewDistance: "tiny",  // можно включить, если сервер лагает
   });
 
-  // ✅ ФИКС ОТ 8192 / plugin_message
-  bot._client?.on("packet", (data, meta) => {
-    if (!meta?.name) return;
-
-    // Частая причина “sourceStart 8192” — огромные plugin_message
-    if (meta.name === "plugin_message") return;
-
-    // иногда ломают бренд/регистры — тоже через plugin_message идут
+  // ✅ ФИКС “sourceStart 8192”: гасим plugin_message
+  bot._client?.on("packet", (_data, meta) => {
+    if (meta?.name === "plugin_message") return;
   });
 
   bot.on("login", () => {
     console.log("✅ MC login");
-    mcState.online = true; // пока “соединение есть”
+    mcState.online = true;
     mcState.lastError = null;
   });
 
@@ -176,20 +154,17 @@ function createMcBot() {
     console.log("✅ MC spawn");
     mcState.spawnedAt = Date.now();
 
-    // подождём, чтобы сервер дослал всё служебное
     await sleep(WAIT_AFTER_SPAWN_MS);
 
-    // автологин (если нужно) — можешь выключить переменной окружения MC_LOGIN_CMD=""
-    if (LOGIN_CMD && LOGIN_CMD.startsWith("/login")) {
+    if (LOGIN_CMD) {
       try {
         bot.chat(LOGIN_CMD);
-        console.log("🔐 Отправил login команду");
+        console.log("🔐 Отправил команду логина");
       } catch (e) {
-        console.log("⚠️ Не смог отправить login:", e?.message || e);
+        console.log("⚠️ Не смог отправить логин:", e?.message || e);
       }
     }
 
-    // запускаем авто-сканы только когда реально в игре
     if (AUTO_SCAN) startAutoScan();
   });
 
@@ -198,42 +173,37 @@ function createMcBot() {
     mcState.lastError = String(reason);
   });
 
+  bot.on("error", (err) => {
+    console.log("❌ MC error:", err?.message || err);
+    mcState.lastError = String(err?.message || err);
+  });
+
   bot.on("end", () => {
     console.log("🔌 MC end/disconnect");
     mcState.online = false;
     mcState.connecting = false;
-    mcState.lastDisconnectAt = Date.now();
     stopAutoScan();
 
     // ✅ авто-реконнект
     setTimeout(() => createMcBot(), 5000);
   });
 
-  bot.on("error", (err) => {
-    console.log("❌ MC error:", err?.message || err);
-    mcState.lastError = String(err?.message || err);
-  });
-
-  // когда уже создали — отпускаем флаг
+  // отпускаем “connecting” на всякий
   setTimeout(() => {
     mcState.connecting = false;
   }, 1500);
 }
 
-/* ================== TAB / PLAYER LIST ================== */
-// Для 1.8.9 у mineflayer обычно есть bot.players
 function getOnlinePlayers() {
   const playersObj = bot?.players || {};
   const names = Object.keys(playersObj).filter((n) => n && n !== bot?.username);
-
-  // иногда список засорён — фильтруем совсем мусор
   return names.filter((n) => /^[A-Za-z0-9_]{3,16}$/.test(n));
 }
 
 /* ================== SCAN ================== */
 async function scanNow() {
   if (!bot) return { ok: false, error: "MC бот не создан" };
-  if (!isMcOnline()) return { ok: false, error: "MC: не в игре (нет entity)" };
+  if (!isMcInGame()) return { ok: false, error: "MC: не в игре (нет entity)" };
   if (scanLock) return { ok: false, error: "Скан уже идёт" };
 
   scanLock = true;
@@ -264,21 +234,21 @@ async function scanNow() {
 /* ================== AUTO SCAN ================== */
 function startAutoScan() {
   stopAutoScan();
-
   const intervalMs = Math.max(1, AUTO_SCAN_MINUTES) * 60 * 1000;
-  console.log(`⏱️ AUTO_SCAN включён: каждые ${AUTO_SCAN_MINUTES} мин`);
+  console.log(`⏱️ AUTO_SCAN: каждые ${AUTO_SCAN_MINUTES} минут`);
 
   autoScanTimer = setInterval(async () => {
     try {
-      if (!isMcOnline()) return;
-
+      if (!isMcInGame()) return;
       const res = await scanNow();
       if (!res.ok) return;
 
       const hasFlags = (res.ban?.length || 0) + (res.review?.length || 0) > 0;
       if (!hasFlags) return;
 
-      await sendScanResult(res, CHAT_ID);
+      if (CHAT_ID) {
+        await tg.telegram.sendMessage(CHAT_ID, formatScan(res));
+      }
     } catch (e) {
       console.log("⚠️ AUTO_SCAN ошибка:", e?.message || e);
     }
@@ -290,80 +260,70 @@ function stopAutoScan() {
   autoScanTimer = null;
 }
 
-/* ================== TG OUTPUT ================== */
+/* ================== TG TEXT ================== */
+function formatStatus() {
+  const status = isMcInGame()
+    ? "✅ в игре"
+    : mcState.online
+      ? "⚠️ подключён, но не в игре"
+      : "❌ не в сети";
+
+  const lines = [
+    `MC статус: ${status}`,
+    `Ник: ${mcState.username}`,
+    `Версия: ${mcState.version}`,
+  ];
+  if (mcState.lastError) lines.push(`Ошибка: ${mcState.lastError}`);
+  return lines.join("\n");
+}
+
 function formatScan(res) {
   const lines = [];
-  lines.push(`MC статус: ${isMcOnline() ? "✅ в игре" : (mcState.online ? "⚠️ подключён, но не в игре" : "❌ не в сети")}`);
-  lines.push(`Ник: ${mcState.username}`);
-  lines.push(`Версия: ${mcState.version}`);
-  if (mcState.lastError) lines.push(`Ошибка: ${mcState.lastError}`);
-
+  lines.push(formatStatus());
   lines.push("");
   lines.push(`Онлайн: ${res.onlineCount}`);
 
   if (res.ban?.length) {
     lines.push("");
     lines.push(`🚫 BAN (${res.ban.length}):`);
-    for (const x of res.ban.slice(0, 30)) lines.push(`- ${x.nick}`);
-    if (res.ban.length > 30) lines.push(`…и ещё ${res.ban.length - 30}`);
+    for (const x of res.ban.slice(0, 40)) lines.push(`- ${x.nick}`);
+    if (res.ban.length > 40) lines.push(`…и ещё ${res.ban.length - 40}`);
   }
 
   if (res.review?.length) {
     lines.push("");
     lines.push(`⚠️ REVIEW (${res.review.length}):`);
-    for (const x of res.review.slice(0, 30)) lines.push(`- ${x.nick}`);
-    if (res.review.length > 30) lines.push(`…и ещё ${res.review.length - 30}`);
+    for (const x of res.review.slice(0, 40)) lines.push(`- ${x.nick}`);
+    if (res.review.length > 40) lines.push(`…и ещё ${res.review.length - 40}`);
   }
 
   return lines.join("\n");
 }
 
-async function sendScanResult(res, chatId) {
-  const text = formatScan(res);
-  const target = chatId || undefined;
-
-  if (target) {
-    return tg.telegram.sendMessage(target, text);
-  }
-  // если CHAT_ID не задан — функция должна вызываться только из контекста команды
-}
-
 /* ================== TG COMMANDS ================== */
-tg.start((ctx) => {
-  ctx.reply(
-    "Готов.\nКоманды:\n/status — статус MC\n/scan — скан онлайна\n/reload — перезагрузить rules.json\n/autoscan_on — включить авто-сканы\n/autoscan_off — выключить авто-сканы"
-  );
+tg.start((ctx) => ctx.reply("Готов.\n/status\n/scan\n/reload\n/autoscan_on\n/autoscan_off"));
+
+tg.command("status", (ctx) => ctx.reply(formatStatus()));
+
+tg.command("reload", (ctx) => {
+  reloadRules();
+  return ctx.reply("✅ rules.json перезагружен");
 });
 
-tg.command("status", async (ctx) => {
-  const statusLines = [
-    `MC статус: ${isMcOnline() ? "✅ в игре" : (mcState.online ? "⚠️ подключён, но не в игре" : "❌ не в сети")}`,
-    `Ник: ${mcState.username}`,
-    `Версия: ${mcState.version}`,
-  ];
-  if (mcState.lastError) statusLines.push(`Ошибка: ${mcState.lastError}`);
-  await ctx.reply(statusLines.join("\n"));
-});
-
-tg.command("reload", async (ctx) => {
-  safeReloadRules();
-  await ctx.reply("✅ rules.json перезагружен");
-});
-
-tg.command("autoscan_on", async (ctx) => {
+tg.command("autoscan_on", (ctx) => {
   startAutoScan();
-  await ctx.reply("✅ AUTO_SCAN включён");
+  return ctx.reply("✅ AUTO_SCAN включён");
 });
 
-tg.command("autoscan_off", async (ctx) => {
+tg.command("autoscan_off", (ctx) => {
   stopAutoScan();
-  await ctx.reply("✅ AUTO_SCAN выключён");
+  return ctx.reply("✅ AUTO_SCAN выключен");
 });
 
 tg.command("scan", async (ctx) => {
   const msg = await ctx.reply("🔎 Сканирую…");
-
   const res = await scanNow();
+
   if (!res.ok) {
     return ctx.telegram.editMessageText(
       ctx.chat.id,
@@ -373,14 +333,56 @@ tg.command("scan", async (ctx) => {
     );
   }
 
-  const text = formatScan(res);
-  await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, text);
+  return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, formatScan(res));
 });
+
+/* ================== FIX 409 CONFLICT ================== */
+async function launchTelegramSafely() {
+  while (true) {
+    try {
+      await tg.launch();
+      console.log("✅ Telegram bot запущен");
+      return;
+    } catch (e) {
+      const msg = String(e?.message || e);
+      // 409 Conflict: другой инстанс уже получает updates
+      if (msg.includes("409") || msg.includes("Conflict")) {
+        console.log("⚠️ 409 Conflict: другой инстанс бота получает updates. Повтор через 10с…");
+        await sleep(10000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+/* ================== GRACEFUL STOP ================== */
+function setupGracefulShutdown() {
+  process.once("SIGINT", () => {
+    try {
+      tg.stop("SIGINT");
+    } catch {}
+    try {
+      bot?.end();
+    } catch {}
+  });
+
+  process.once("SIGTERM", () => {
+    try {
+      tg.stop("SIGTERM");
+    } catch {}
+    try {
+      bot?.end();
+    } catch {}
+  });
+}
 
 /* ================== START ================== */
 async function main() {
+  setupGracefulShutdown();
+
   console.log("🤖 Telegram bot запускается…");
-  await tg.launch();
+  await launchTelegramSafely();
 
   console.log("🧱 MC bot запускается…");
   createMcBot();
