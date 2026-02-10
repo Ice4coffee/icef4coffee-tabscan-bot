@@ -12,9 +12,7 @@ http
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("OK\n");
   })
-  .listen(PORT, "0.0.0.0", () => {
-    console.log(`🌐 Health server listening on ${PORT}`);
-  });
+  .listen(PORT, "0.0.0.0", () => console.log(`🌐 Health server listening on ${PORT}`));
 
 /* ================== ENV ================== */
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -25,14 +23,19 @@ const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
 const MC_VERSION = "1.8.9";
 
-const LOGIN_CMD = (process.env.MC_LOGIN_CMD || "").trim(); // пример: "/login password"
+const LOGIN_CMD = (process.env.MC_LOGIN_CMD || "").trim(); // "/login password"
 const WAIT_AFTER_SPAWN_MS = Number(process.env.WAIT_AFTER_SPAWN_MS || 3000);
 
-const AUTO_SCAN = (process.env.AUTO_SCAN || "0") === "1";
-const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
+
+// AI настройки
+const AI_ENABLED = (process.env.AI_ENABLED || "1") === "1";
+const AI_BUDGET_PER_AI_CLICK = Number(process.env.AI_BUDGET_PER_AI_CLICK || 30); // сколько REVIEW прогоняем по кнопке
+const AI_MIN_CONF_FOR_BAN = Number(process.env.AI_MIN_CONF_FOR_BAN || 0.75);
+const AI_MIN_CONF_FOR_OK = Number(process.env.AI_MIN_CONF_FOR_OK || 0.75);
+const AI_DELAY_MS = Number(process.env.AI_DELAY_MS || 350);
 
 if (!BOT_TOKEN) throw new Error("Нужен BOT_TOKEN");
 if (!MC_HOST || !MC_USER) console.log("⚠️ MC_HOST/MC_USER не заданы — MC часть не запустится.");
@@ -45,20 +48,12 @@ process.on("uncaughtException", (e) => console.error("🔥 uncaughtException:", 
 process.on("unhandledRejection", (e) => console.error("🔥 unhandledRejection:", e));
 
 process.once("SIGINT", () => {
-  try {
-    tg.stop("SIGINT");
-  } catch {}
-  try {
-    bot?.end();
-  } catch {}
+  try { tg.stop("SIGINT"); } catch {}
+  try { bot?.end(); } catch {}
 });
 process.once("SIGTERM", () => {
-  try {
-    tg.stop("SIGTERM");
-  } catch {}
-  try {
-    bot?.end();
-  } catch {}
+  try { tg.stop("SIGTERM"); } catch {}
+  try { bot?.end(); } catch {}
 });
 
 /* ================== SAFE TG WRAPPERS ================== */
@@ -74,24 +69,17 @@ async function safeAnswerCbQuery(ctx, text) {
 
 async function safeEditMessageText(ctx, text, extra) {
   try {
-    if (!ctx?.callbackQuery?.message) {
-      return ctx.reply(text, extra);
-    }
+    if (!ctx?.callbackQuery?.message) return ctx.reply(text, extra);
     return await ctx.editMessageText(text, extra);
   } catch (e) {
     const msg = String(e?.message || e);
     if (msg.includes("message is not modified")) return;
-    if (msg.includes("message can't be edited") || msg.includes("MESSAGE_ID_INVALID")) {
-      return ctx.reply(text, extra);
-    }
+    if (msg.includes("message can't be edited") || msg.includes("MESSAGE_ID_INVALID")) return ctx.reply(text, extra);
     console.log("⚠️ editMessageText error:", msg);
   }
 }
 
-/* Чтобы бот не падал на ошибках внутри обработчиков */
-tg.catch((err) => {
-  console.log("⚠️ Telegraf handler error:", err?.message || err);
-});
+tg.catch((err) => console.log("⚠️ Telegraf handler error:", err?.message || err));
 
 /* ================== RULES LOADER ================== */
 function loadRules() {
@@ -125,28 +113,18 @@ function normalizeByRules(nick) {
   if (norm.lowercase) s = s.toLowerCase();
 
   if (norm.strip_invisibles_regex) {
-    try {
-      s = s.replace(new RegExp(norm.strip_invisibles_regex, "g"), "");
-    } catch {}
+    try { s = s.replace(new RegExp(norm.strip_invisibles_regex, "g"), ""); } catch {}
   }
-
   if (norm.separators_regex) {
-    try {
-      s = s.replace(new RegExp(norm.separators_regex, "g"), "");
-    } catch {}
+    try { s = s.replace(new RegExp(norm.separators_regex, "g"), ""); } catch {}
   }
-
   if (norm.leet_map) {
-    for (const [k, v] of Object.entries(norm.leet_map)) {
-      s = s.split(k).join(v);
-    }
+    for (const [k, v] of Object.entries(norm.leet_map)) s = s.split(k).join(v);
   }
-
   if (norm.collapse_repeats) {
     const max = Number(norm.max_repeat || 2);
     s = s.replace(/(.)\1+/g, (_m, c) => String(c).repeat(Math.max(1, Math.min(5, max))));
   }
-
   return s;
 }
 
@@ -159,8 +137,7 @@ function checkNickByRules(nick) {
   }
 
   for (const rule of RULES.rules || []) {
-    const words = rule.words || [];
-    for (const w of words) {
+    for (const w of rule.words || []) {
       if (w && norm.includes(String(w).toLowerCase())) {
         return {
           verdict: String(rule.action || "BAN").toUpperCase(),
@@ -187,7 +164,7 @@ if (GEMINI_API_KEY) {
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
   geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 } else {
-  console.log("⚠️ GEMINI_API_KEY не задан — AI REVIEW выключен.");
+  console.log("⚠️ GEMINI_API_KEY не задан — AI выключен.");
 }
 
 async function geminiReviewNick({ nick }) {
@@ -221,10 +198,7 @@ OK — если чисто.
     const confidence = Math.max(0, Math.min(1, Number(data.confidence || 0)));
     const reason = String(data.reason || "—").slice(0, 120);
 
-    if (!["BAN", "REVIEW", "OK"].includes(decision)) {
-      return { decision: "REVIEW", confidence: 0, reason: "AI decision некорректный" };
-    }
-
+    if (!["BAN", "REVIEW", "OK"].includes(decision)) return { decision: "REVIEW", confidence: 0, reason: "AI decision некорректный" };
     return { decision, confidence, reason };
   } catch {
     return { decision: "REVIEW", confidence: 0, reason: "Ошибка Gemini" };
@@ -234,7 +208,6 @@ OK — если чисто.
 /* ================== MINEFLAYER ================== */
 let bot = null;
 let scanLock = false;
-let autoScanTimer = null;
 
 function mcInGame() {
   return !!bot?.player?.entity;
@@ -273,8 +246,6 @@ function createMcBot() {
         console.log("⚠️ MC login cmd error:", e?.message || e);
       }
     }
-
-    if (AUTO_SCAN) startAutoScan();
   });
 
   bot.on("kicked", (reason) => console.log("⛔ MC kicked:", reason));
@@ -282,7 +253,6 @@ function createMcBot() {
 
   bot.on("end", () => {
     console.log("❌ MC disconnected");
-    stopAutoScan();
     bot = null;
     setTimeout(createMcBot, 5000);
   });
@@ -294,24 +264,21 @@ async function getPlayersTabComplete() {
   return new Promise((resolve) => {
     bot.tabComplete("/msg ", (err, results) => {
       if (err || !Array.isArray(results)) return resolve([]);
-
       const names = results
         .map((x) => (typeof x === "string" ? x : x?.match))
         .filter(Boolean)
         .map((s) => String(s).trim())
         .filter((n) => /^[A-Za-z0-9_]{3,16}$/.test(n))
         .filter((n) => n !== MC_USER);
-
       resolve([...new Set(names)]);
     });
   });
 }
 
 function getPlayersFromBotPlayers() {
-  const names = Object.keys(bot?.players || {})
-    .filter((n) => n && n !== MC_USER)
-    .filter((n) => /^[A-Za-z0-9_]{3,16}$/.test(n));
-  return [...new Set(names)];
+  return [...new Set(Object.keys(bot?.players || {}).filter((n) => n && n !== MC_USER))].filter((n) =>
+    /^[A-Za-z0-9_]{3,16}$/.test(n)
+  );
 }
 
 async function getOnlinePlayersSmart() {
@@ -320,133 +287,154 @@ async function getOnlinePlayersSmart() {
   return getPlayersFromBotPlayers();
 }
 
-/* ================== SCAN (rules + AI for REVIEW) ================== */
-async function scanAll({ useAI = true } = {}) {
+/* ================== LAST SCAN CACHE ================== */
+// Здесь сохраняем последний скан "по rules" (без AI).
+let lastScan = null;
+// lastScan = { ts, total, ban[], reviewCandidates[], ok[] }
+
+/* ================== SCAN: RULES ONLY ================== */
+async function scanRulesOnly() {
   if (!mcInGame() || scanLock) return null;
   scanLock = true;
 
   try {
     const players = await getOnlinePlayersSmart();
-
-    const res = { total: players.length, ban: [], review: [], ok: [] };
-
-    // лимит AI на один скан
-    let aiBudget = 25;
+    const res = {
+      ts: Date.now(),
+      total: players.length,
+      ban: [],
+      reviewCandidates: [],
+      ok: []
+    };
 
     for (const nick of players) {
       const r = checkNickByRules(nick);
 
-      if (r.verdict === "BAN") {
-        res.ban.push(`${nick} (${r.reason})`);
-      } else if (r.verdict === "REVIEW") {
-        if (useAI && geminiModel && aiBudget > 0) {
-          aiBudget--;
-          const ai = await geminiReviewNick({ nick });
-          await sleep(350);
-
-          if (ai.decision === "BAN" && ai.confidence >= 0.75) {
-            res.ban.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
-          } else if (ai.decision === "OK" && ai.confidence >= 0.75) {
-            res.ok.push(`${nick} (AI OK, ${Math.round(ai.confidence * 100)}%)`);
-          } else {
-            res.review.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
-          }
-        } else {
-          res.review.push(`${nick} (${r.reason})`);
-        }
-      } else {
-        res.ok.push(nick);
-      }
+      if (r.verdict === "BAN") res.ban.push(`${nick} (${r.reason})`);
+      else if (r.verdict === "REVIEW") res.reviewCandidates.push(nick);
+      else res.ok.push(nick);
 
       await sleep(SCAN_DELAY_MS);
     }
 
+    lastScan = res;
     return res;
   } finally {
     scanLock = false;
   }
 }
 
-function formatScan(res) {
+/* ================== AI: PROCESS LAST SCAN REVIEW ================== */
+async function aiProcessLastScan() {
+  if (!lastScan) return { ok: false, error: "Нет последнего скана. Сначала нажми 🔎 Скан всех" };
+
+  if (!AI_ENABLED) return { ok: false, error: "AI выключен (AI_ENABLED=0)" };
+  if (!geminiModel) return { ok: false, error: "AI выключен (нет GEMINI_API_KEY)" };
+
+  const candidates = [...(lastScan.reviewCandidates || [])];
+  if (!candidates.length) {
+    return {
+      ok: true,
+      total: lastScan.total,
+      ban: [...lastScan.ban],
+      review: [],
+      okList: [...lastScan.ok],
+      note: "В последнем скане нет REVIEW ников"
+    };
+  }
+
+  const ban = [...lastScan.ban];
+  const okList = [...lastScan.ok];
+  const review = [];
+
+  let budget = Math.max(0, AI_BUDGET_PER_AI_CLICK);
+
+  for (const nick of candidates) {
+    if (budget <= 0) {
+      review.push(`${nick} (лимит AI исчерпан)`);
+      continue;
+    }
+    budget--;
+
+    const ai = await geminiReviewNick({ nick });
+    await sleep(AI_DELAY_MS);
+
+    if (ai.decision === "BAN" && ai.confidence >= AI_MIN_CONF_FOR_BAN) {
+      ban.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+    } else if (ai.decision === "OK" && ai.confidence >= AI_MIN_CONF_FOR_OK) {
+      okList.push(`${nick} (AI OK, ${Math.round(ai.confidence * 100)}%)`);
+    } else {
+      review.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+    }
+  }
+
+  return {
+    ok: true,
+    total: lastScan.total,
+    ban,
+    review,
+    okList,
+    note: `AI проверил: ${Math.min(AI_BUDGET_PER_AI_CLICK, candidates.length)} из ${candidates.length}`
+  };
+}
+
+/* ================== FORMATTERS ================== */
+function formatStatusText() {
+  const st = mcInGame() ? "✅ в игре" : "❌ не в сети";
+  const ai = geminiModel && AI_ENABLED ? "✅ включён" : "❌ выключен";
+  const last = lastScan ? `✅ есть (REVIEW: ${lastScan.reviewCandidates.length})` : "❌ нет";
+  return `MC статус: ${st}\nНик: ${MC_USER}\nВерсия: ${MC_VERSION}\nAI (Gemini): ${ai}\nLast scan: ${last}`;
+}
+
+function formatRulesScan(res) {
   const lines = [];
   lines.push(`👥 Онлайн: ${res.total}`);
-
   lines.push("");
   lines.push(`🚫 BAN (${res.ban.length}):`);
   lines.push(res.ban.length ? res.ban.slice(0, 50).join("\n") : "—");
-
   lines.push("");
-  lines.push(`⚠️ REVIEW (${res.review.length}):`);
-  lines.push(res.review.length ? res.review.slice(0, 50).join("\n") : "—");
-
+  lines.push(`⚠️ REVIEW (rules) (${res.reviewCandidates.length}):`);
+  lines.push(res.reviewCandidates.length ? res.reviewCandidates.slice(0, 50).join("\n") : "—");
   lines.push("");
   lines.push(`✅ OK (${res.ok.length}):`);
-  lines.push(
-    res.ok.length
-      ? res.ok.slice(0, 30).join(", ") + (res.ok.length > 30 ? ` …(+${res.ok.length - 30})` : "")
-      : "—"
-  );
-
+  lines.push(res.ok.length ? res.ok.slice(0, 30).join(", ") + (res.ok.length > 30 ? ` …(+${res.ok.length - 30})` : "") : "—");
   return lines.join("\n").slice(0, 3900);
 }
 
-/* ================== AUTO SCAN ================== */
-function startAutoScan() {
-  stopAutoScan();
-  const interval = Math.max(1, AUTO_SCAN_MINUTES) * 60 * 1000;
-  console.log(`⏱️ AUTO_SCAN: каждые ${AUTO_SCAN_MINUTES} мин`);
-
-  autoScanTimer = setInterval(async () => {
-    try {
-      if (!mcInGame()) return;
-      const r = await scanAll({ useAI: true });
-      if (!r) return;
-
-      const hasFlags = r.ban.length + r.review.length > 0;
-      if (!hasFlags) return;
-
-      if (CHAT_ID) await tg.telegram.sendMessage(CHAT_ID, "🚨 AUTO SCAN\n\n" + formatScan(r));
-    } catch (e) {
-      console.log("⚠️ AUTO_SCAN error:", e?.message || e);
-    }
-  }, interval);
-}
-
-function stopAutoScan() {
-  if (autoScanTimer) clearInterval(autoScanTimer);
-  autoScanTimer = null;
+function formatAiResult(r) {
+  const lines = [];
+  lines.push(`👥 Онлайн (посл. скан): ${r.total}`);
+  if (r.note) lines.push(`🧠 ${r.note}`);
+  lines.push("");
+  lines.push(`🚫 BAN (${r.ban.length}):`);
+  lines.push(r.ban.length ? r.ban.slice(0, 50).join("\n") : "—");
+  lines.push("");
+  lines.push(`⚠️ REVIEW (${r.review.length}):`);
+  lines.push(r.review.length ? r.review.slice(0, 50).join("\n") : "—");
+  lines.push("");
+  lines.push(`✅ OK (${r.okList.length}):`);
+  lines.push(
+    r.okList.length
+      ? r.okList.slice(0, 30).join(", ") + (r.okList.length > 30 ? ` …(+${r.okList.length - 30})` : "")
+      : "—"
+  );
+  return lines.join("\n").slice(0, 3900);
 }
 
 /* ================== TELEGRAM UI ================== */
 function mainKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("🔎 Скан всех", "scan_all")],
-    [Markup.button.callback("📊 Статус", "status")],
-    [Markup.button.callback("🤖 AI проверить ник", "ai_check")],
-    [Markup.button.callback("🔁 Reload rules", "reload_rules")]
+    [Markup.button.callback("🔎 Скан всех (rules)", "scan_rules")],
+    [Markup.button.callback("🤖 AI по последнему скану", "ai_last")],
+    [Markup.button.callback("🧪 AI один ник", "ai_one")],
+    [Markup.button.callback("📊 Статус", "status"), Markup.button.callback("🔁 Reload rules", "reload_rules")]
   ]);
 }
 
-function formatStatusText() {
-  const st = mcInGame() ? "✅ в игре" : "❌ не в сети";
-  const ai = geminiModel ? "✅ включён" : "❌ выключен";
-  return `MC статус: ${st}\nНик: ${MC_USER}\nВерсия: ${MC_VERSION}\nAI (Gemini): ${ai}`;
-}
-
-// состояние для ручной AI проверки
+/* ================== MANUAL AI ONE NICK STATE ================== */
 const awaitingAiNick = new Map(); // chatId -> userId
 
-tg.start((ctx) => {
-  ctx.reply("🤖 TabScan Bot\n\nВыбери действие:", mainKeyboard());
-});
-
-tg.command("status", (ctx) => ctx.reply(formatStatusText(), mainKeyboard()));
-tg.command("scanall", async (ctx) => {
-  const msg = await ctx.reply("🔎 Сканирую…");
-  const r = await scanAll({ useAI: true });
-  if (!r) return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, "❌ MC не в игре");
-  return ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, formatScan(r));
-});
+tg.start((ctx) => ctx.reply("🤖 TabScan Bot\n\nВыбери действие:", mainKeyboard()));
 
 tg.action("status", async (ctx) => {
   await safeAnswerCbQuery(ctx);
@@ -459,19 +447,39 @@ tg.action("reload_rules", async (ctx) => {
   return safeEditMessageText(ctx, "✅ rules.json перезагружен", mainKeyboard());
 });
 
-tg.action("scan_all", async (ctx) => {
+/* ====== SCAN RULES BUTTON ====== */
+tg.action("scan_rules", async (ctx) => {
   await safeAnswerCbQuery(ctx, "Сканирую…");
-  const r = await scanAll({ useAI: true });
-  if (!r) return safeEditMessageText(ctx, "❌ MC не в игре", mainKeyboard());
-  return safeEditMessageText(ctx, formatScan(r), mainKeyboard());
+
+  // сразу покажем, что идёт скан (чтобы пользователь видел)
+  await safeEditMessageText(ctx, "🔎 Скан (rules) запущен…", mainKeyboard());
+
+  const res = await scanRulesOnly();
+  if (!res) return safeEditMessageText(ctx, "❌ MC не в игре", mainKeyboard());
+
+  return safeEditMessageText(ctx, formatRulesScan(res), mainKeyboard());
 });
 
-tg.action("ai_check", async (ctx) => {
+/* ====== AI LAST SCAN BUTTON ====== */
+tg.action("ai_last", async (ctx) => {
+  await safeAnswerCbQuery(ctx, "AI проверяю REVIEW…");
+
+  // мгновенно обновим сообщение
+  await safeEditMessageText(ctx, "🤖 AI проверяет ники из последнего скана…", mainKeyboard());
+
+  const r = await aiProcessLastScan();
+  if (!r.ok) return safeEditMessageText(ctx, `❌ ${r.error}`, mainKeyboard());
+
+  return safeEditMessageText(ctx, formatAiResult(r), mainKeyboard());
+});
+
+/* ====== AI ONE NICK (manual) ====== */
+tg.action("ai_one", async (ctx) => {
   await safeAnswerCbQuery(ctx);
   awaitingAiNick.set(ctx.chat.id, ctx.from.id);
   return safeEditMessageText(
     ctx,
-    "🤖 Отправь ник одним сообщением (только ник).\n\nПример: xX_Nick_123_Xx",
+    "🧪 Отправь ник одним сообщением (только ник).\nПример: xX_Nick_123_Xx",
     Markup.inlineKeyboard([[Markup.button.callback("⬅️ Назад", "back")]])
   );
 });
@@ -489,9 +497,7 @@ tg.on("text", async (ctx) => {
   const nick = String(ctx.message.text || "").trim();
   awaitingAiNick.delete(ctx.chat.id);
 
-  if (!nick || nick.length > 32) {
-    return ctx.reply("❌ Пришли один ник (короткий).", mainKeyboard());
-  }
+  if (!nick || nick.length > 32) return ctx.reply("❌ Пришли один ник (короткий).", mainKeyboard());
 
   const ruleRes = checkNickByRules(nick);
   const ai = await geminiReviewNick({ nick });
