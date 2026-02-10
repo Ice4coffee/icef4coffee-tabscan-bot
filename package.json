@@ -9,5 +9,7 @@
   "dependencies": {
     "mineflayer": "^4.20.1",
     "telegraf": "^4.16.3"
+    "openai": "^5.0.0"
   }
 }
+
