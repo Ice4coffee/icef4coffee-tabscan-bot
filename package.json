@@ -8,9 +8,7 @@
   },
   "dependencies": {
     "mineflayer": "^4.20.1",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
     "@google/generative-ai": "^0.21.0"
   }
 }
-
-
