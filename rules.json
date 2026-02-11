@@ -26,14 +26,15 @@
       "words": [
         "hui","hyi","xuy","xyu","xue",
         "pizd","piz","pis","piss",
-        "bly","blya","blyat","blya",
+        "bly","blya","blyat",
         "ebal","eby","ebalo","ebanat",
         "yeb","yeban","yebal","yebat",
         "zalup","bebra","bebrik",
         "gandon","gand0n","eblan",
         "pezduk","pezduck",
         "piska","gey","fuck",
-        "sosi","kotak","k0tak","kot4k","k0t4k"
+        "sosi",
+        "kotak","k0tak","kot4k","k0t4k",
         "govn","govnoed","g0vn","g0vn0ed",
         "kotakbas","kotokbas"
       ]
@@ -104,7 +105,6 @@
         "newlauncher","flauncher",
         "augustus","vape","vapelite","vapev4",
         "doomsday","nursultanclient",
-
         "wurst",
         "impact","meteor",
         "aristois",
@@ -112,7 +112,6 @@
         "future","inertia",
         "rusherhack",
         "thunderhack","salhack",
-
         "novoline","exhibition",
         "skilled","astolfo",
         "zeroday","moonlight",
@@ -147,21 +146,15 @@
   "review": [
     "niger",
     "svo",
-    "CBO",
-    "svo",
-    "ZOV",
+    "cbo",
+    "zov",
     "sex",
-    "nagibator",
+    "nagibator"
   ],
 
   "whitelist_exact": [
-    "maktraher","Agera001",
-    "picun","Agera001",
+    "maktraher",
+    "agera001",
+    "picun"
   ]
 }
-
-
-
-
-
-
