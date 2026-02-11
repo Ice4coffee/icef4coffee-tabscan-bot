@@ -179,131 +179,7 @@ async function resolveMcEndpoint(host, port) {
   return { host: h, port: Number(port || 25565), via: "DIRECT" };
 }
 
-/* ================== MINEFLAYER ================== */
-let mc;
-let mcReady = false;
-let mcOnline = false;
-let mcLastError = "";
-let loginSent = false;
-let registerSent = false;
-let reconnectTimer = null;
-let connecting = false;
-
-function scheduleReconnect(reason) {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectMC().catch(() => {});
-  }, 5000);
-}
-
-async function connectMC() {
-  if (connecting) return;
-  connecting = true;
-
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-
-  if (mc) {
-    try { mc.quit?.("reconnect"); } catch {}
-    try { mc.end?.(); } catch {}
-    try { mc._client?.end?.(); } catch {}
-    mc = null;
-  }
-
-  mcReady = false;
-  mcOnline = false;
-  mcLastError = "";
-  loginSent = false;
-  registerSent = false;
-
-  const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
-
-  console.log("[MC DEBUG]", {
-    inputHost: MC_HOST,
-    inputPort: MC_PORT,
-    resolvedHost: ep.host,
-    resolvedPort: ep.port,
-    via: ep.via,
-    version: MC_VERSION,
-    user: MC_USER
-  });
-
-  try {
-    mc = mineflayer.createBot({
-      host: ep.host,
-      port: ep.port,
-      username: MC_USER,
-      version: MC_VERSION,
-      viewDistance: 1 // меньше шансов на кривые чанки
-    });
-  } catch (e) {
-    mcLastError = "createBot failed: " + String(e?.message || e);
-    console.log("[MC]", mcLastError);
-    scheduleReconnect("createBot");
-    connecting = false;
-    return;
-  }
-
-  mc.on("login", () => {
-    // ВАЖНО: глушим чанки сразу после login
-    disableChunkParsing(mc);
-
-    mcOnline = true;
-    mcReady = false;
-    mcLastError = "";
-    console.log("[MC] login");
-  });
-
-  mc.on("spawn", () => {
-    console.log("[MC] spawn");
-    setTimeout(() => {
-      if (mc && mc.entity) {
-        mcReady = true;
-        console.log("[MC] READY");
-      } else {
-        mcReady = false;
-        scheduleReconnect("no-entity");
-      }
-    }, READY_AFTER_MS);
-  });
-
-  mc.on("messagestr", (msg) => {
-    const m = String(msg).toLowerCase();
-    if (MC_PASSWORD && !loginSent && m.includes("login")) {
-      loginSent = true;
-      setTimeout(() => mc?.chat?.(`/login ${MC_PASSWORD}`), 1500);
-    }
-    if (MC_PASSWORD && !registerSent && m.includes("register")) {
-      registerSent = true;
-      setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
-    }
-  });
-
-  const onDisconnect = (reason) => {
-    mcReady = false;
-    mcOnline = false;
-    mcLastError = reason;
-    loginSent = false;
-    registerSent = false;
-    console.log("[MC] disconnected:", reason);
-    scheduleReconnect(reason);
-  };
-
-  mc.on("end", () => onDisconnect("end"));
-  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
-  mc.on("error", (e) => {
-    const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
-    onDisconnect("error: " + msg);
-  });
-
-  setTimeout(() => { connecting = false; }, 1200);
-}
-
-connectMC().catch((e) => console.log("[MC] connect error:", e?.message || e));
-
-/* ================== TAB SCAN ================== */
-function clean(s) { return String(s).replace(/[^A-Za-z0-9_]/g, ""); }
-
+/* ================== TAB COMPLETE ================== */
 function tabComplete(bot, text) {
   return new Promise((res, rej) => {
     if (!bot?._client) return rej(new Error("CLIENT_NOT_READY"));
@@ -336,6 +212,147 @@ function tabComplete(bot, text) {
     }
   });
 }
+
+/* ================== MINEFLAYER ================== */
+let mc;
+let mcReady = false;
+let tabReady = false;     // ✅ READY через tab_complete
+let mcOnline = false;
+let mcLastError = "";
+let loginSent = false;
+let registerSent = false;
+let reconnectTimer = null;
+let connecting = false;
+
+function scheduleReconnect(reason) {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectMC().catch(() => {});
+  }, 5000);
+}
+
+async function connectMC() {
+  if (connecting) return;
+  connecting = true;
+
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+  if (mc) {
+    try { mc.quit?.("reconnect"); } catch {}
+    try { mc.end?.(); } catch {}
+    try { mc._client?.end?.(); } catch {}
+    mc = null;
+  }
+
+  mcReady = false;
+  tabReady = false;
+  mcOnline = false;
+  mcLastError = "";
+  loginSent = false;
+  registerSent = false;
+
+  const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
+
+  console.log("[MC DEBUG]", {
+    inputHost: MC_HOST,
+    inputPort: MC_PORT,
+    resolvedHost: ep.host,
+    resolvedPort: ep.port,
+    via: ep.via,
+    version: MC_VERSION,
+    user: MC_USER
+  });
+
+  try {
+    mc = mineflayer.createBot({
+      host: ep.host,
+      port: ep.port,
+      username: MC_USER,
+      version: MC_VERSION,
+      viewDistance: 1
+    });
+  } catch (e) {
+    mcLastError = "createBot failed: " + String(e?.message || e);
+    console.log("[MC]", mcLastError);
+    scheduleReconnect("createBot");
+    connecting = false;
+    return;
+  }
+
+  mc.on("login", () => {
+    // глушим чанки, чтобы не падало
+    disableChunkParsing(mc);
+
+    mcOnline = true;
+    mcReady = false;
+    mcLastError = "";
+    console.log("[MC] login");
+
+    // ✅ Если spawn не приходит (лимбо/антибот), считаем готов по tab_complete
+    setTimeout(async () => {
+      if (!mc || mcReady || tabReady) return;
+      try {
+        const r = await tabComplete(mc, "/msg a");
+        if (Array.isArray(r)) {
+          tabReady = true;
+          mcReady = true;
+          console.log("[MC] READY via TAB_COMPLETE");
+        }
+      } catch {}
+    }, 2500);
+  });
+
+  mc.on("spawn", () => {
+    console.log("[MC] spawn");
+    setTimeout(() => {
+      if (mc && mc.entity) {
+        mcReady = true;
+        console.log("[MC] READY via SPAWN");
+      } else {
+        mcReady = false;
+        scheduleReconnect("no-entity");
+      }
+    }, READY_AFTER_MS);
+  });
+
+  mc.on("messagestr", (msg) => {
+    const m = String(msg).toLowerCase();
+    if (MC_PASSWORD && !loginSent && m.includes("login")) {
+      loginSent = true;
+      setTimeout(() => mc?.chat?.(`/login ${MC_PASSWORD}`), 1500);
+    }
+    if (MC_PASSWORD && !registerSent && m.includes("register")) {
+      registerSent = true;
+      setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
+    }
+  });
+
+  const onDisconnect = (reason) => {
+    mcReady = false;
+    tabReady = false;
+    mcOnline = false;
+    mcLastError = reason;
+    loginSent = false;
+    registerSent = false;
+    console.log("[MC] disconnected:", reason);
+    scheduleReconnect(reason);
+  };
+
+  mc.on("end", () => onDisconnect("end"));
+  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
+  mc.on("error", (e) => {
+    const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
+    onDisconnect("error: " + msg);
+  });
+
+  setTimeout(() => { connecting = false; }, 1200);
+}
+
+connectMC().catch((e) => console.log("[MC] connect error:", e?.message || e));
+
+/* ================== SCAN HELPERS ================== */
+function clean(s) { return String(s).replace(/[^A-Za-z0-9_]/g, ""); }
 
 async function byPrefix(prefix) {
   const raw = await tabComplete(mc, `/msg ${prefix}`);
@@ -414,4 +431,4 @@ if (AUTO_SCAN) {
       console.log("[AUTO] error:", String(e?.message||e));
     }
   }, AUTO_SCAN_MINUTES*60*1000);
-}
+  }
