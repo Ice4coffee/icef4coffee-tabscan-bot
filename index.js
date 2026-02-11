@@ -135,11 +135,34 @@ function report(title, names) {
   return { out, ban: ban.length, rev: rev.length };
 }
 
+/* ================== SAFE MODE: DISABLE CHUNK PARSING ================== */
+function disableChunkParsing(bot) {
+  const c = bot?._client;
+  if (!c) return;
+
+  const packetNames = [
+    "map_chunk",
+    "map_chunk_bulk",
+    "unload_chunk",
+    "multi_block_change",
+    "block_change",
+    "update_block_entity",
+    "block_action"
+  ];
+
+  for (const name of packetNames) {
+    try {
+      c.removeAllListeners(name);
+      c.on(name, () => {});
+    } catch {}
+  }
+
+  console.log("[MC] chunk parsing disabled (safe mode)");
+}
+
 /* ================== SRV RESOLVE ================== */
 async function resolveMcEndpoint(host, port) {
   const h = String(host || "").trim();
-
-  // если ip — srv не нужен
   const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(h);
 
   if (!isIp) {
@@ -210,7 +233,8 @@ async function connectMC() {
       host: ep.host,
       port: ep.port,
       username: MC_USER,
-      version: MC_VERSION
+      version: MC_VERSION,
+      viewDistance: 1 // меньше шансов на кривые чанки
     });
   } catch (e) {
     mcLastError = "createBot failed: " + String(e?.message || e);
@@ -221,6 +245,9 @@ async function connectMC() {
   }
 
   mc.on("login", () => {
+    // ВАЖНО: глушим чанки сразу после login
+    disableChunkParsing(mc);
+
     mcOnline = true;
     mcReady = false;
     mcLastError = "";
@@ -387,4 +414,4 @@ if (AUTO_SCAN) {
       console.log("[AUTO] error:", String(e?.message||e));
     }
   }, AUTO_SCAN_MINUTES*60*1000);
-        }
+}
