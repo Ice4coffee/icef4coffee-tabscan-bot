@@ -77,7 +77,6 @@
       "reason": "Наркотики",
       "words": [
         "mefedron",
-        "meth",
         "heroin",
         "weed",
         "hash",
@@ -106,18 +105,18 @@
         "augustus","vape","vapelite","vapev4",
         "doomsday","nursultanclient",
 
-        "rise","wurst",
+        "wurst",
         "impact","meteor",
         "aristois",
         "liquidbounce",
         "future","inertia",
-        "kami","rusherhack",
+        "rusherhack",
         "thunderhack","salhack",
 
         "novoline","exhibition",
         "skilled","astolfo",
-        "zeroday","moon",
-        "echo","nexus",
+        "zeroday","moonlight",
+        "nexus",
         "eternity","crimson"
       ]
     },
@@ -129,8 +128,6 @@
       "words": [
         "owner","admin","helper",
         "moder",
-        "staff","support",
-        "dev","developer",
         "administrator","moderator"
       ]
     },
@@ -155,14 +152,14 @@
     "ZOV",
     "sex",
     "nagibator",
-    "drug"
   ],
 
   "whitelist_exact": [
-    "maktraher",
-    "picun"
+    "maktraher","Agera001",
+    "picun","Agera001",
   ]
 }
+
 
 
 
