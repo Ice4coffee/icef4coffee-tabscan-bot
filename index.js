@@ -8,10 +8,16 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
+const BOT_MODE = (process.env.BOT_MODE || "moderation").trim().toLowerCase();
+const IS_HELPER_MODE = BOT_MODE === "helper";
+const IS_MODERATION_MODE = !IS_HELPER_MODE;
 
 const MC_HOST = (process.env.MC_HOST || "").trim();
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
+const HELPER_CHAT_BUFFER = Number(process.env.HELPER_CHAT_BUFFER || 40);
+const HELPER_BRIDGE_NUMBER = Math.min(4, Math.max(1, Number(process.env.HELPER_BRIDGE_NUMBER || 1)));
+const HELPER_RULES_FILE = (process.env.HELPER_RULES_FILE || "helper-rules.json").trim();
 
 const MC_VERSION = process.env.MC_VERSION || "1.8.9";
 const MC_PASSWORD = process.env.MC_PASSWORD; // РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ С‚РІРѕРёРј messagestr Р»РѕРіРёРЅРѕРј
@@ -31,8 +37,8 @@ const AI_DELAY_MS = Number(process.env.AI_DELAY_MS || 350);
 const AI_MIN_CONF_FOR_BAN = Number(process.env.AI_MIN_CONF_FOR_BAN || 0.75);
 const AI_MIN_CONF_FOR_OK = Number(process.env.AI_MIN_CONF_FOR_OK || 0.75);
 
-if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
-  throw new Error("РќСѓР¶РЅС‹ BOT_TOKEN, MC_HOST, MC_USER");
+if (!BOT_TOKEN || !MC_USER || !MC_HOST) {
+  throw new Error("Нужны BOT_TOKEN, MC_USER и MC_HOST");
 }
 
 /* ================== TELEGRAM BOT ================== */
@@ -80,11 +86,16 @@ async function launchTelegramSafely() {
 
 /* ================== RULES ================== */
 let RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
+let HELPER_RULES = JSON.parse(fs.readFileSync(HELPER_RULES_FILE, "utf8"));
 
 function reloadRules() {
   RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
   // РѕР±РЅРѕРІРёРј regex/РЅР°СЃС‚СЂРѕР№РєРё
   rebuildNormalization();
+}
+
+function reloadHelperRules() {
+  HELPER_RULES = JSON.parse(fs.readFileSync(HELPER_RULES_FILE, "utf8"));
 }
 
 /* ================== NORMALIZE ================== */
@@ -213,6 +224,71 @@ function report(title, names) {
   return { out, ban: ban.length, rev: rev.length, reviewNicks: rev.map(x => x.nick) };
 }
 
+function helperNorm(s = "") {
+  return norm(s);
+}
+
+function detectBadWordInText(text) {
+  const normalizedText = helperNorm(text);
+  const banRules = HELPER_RULES?.ban_rules || [];
+  const keywordRules = HELPER_RULES?.keyword_rules || [];
+  const allRules = [...banRules, ...keywordRules];
+
+  for (const rule of allRules) {
+    for (const sourceWord of (rule.words || [])) {
+      const w = helperNorm(String(sourceWord));
+      if (!w) continue;
+      if (normalizedText.includes(w)) {
+        return {
+          ruleId: rule.id || "BAN_RULE",
+          reason: rule.reason || "Нарушение правил",
+          word: sourceWord
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function detectRule211Violation(text) {
+  const src = String(text || "");
+  const low = src.toLowerCase();
+  const cfg = HELPER_RULES?.rule_211 || {};
+
+  if (cfg.enabled === false) return null;
+
+  const patterns = Array.isArray(cfg.patterns) ? cfg.patterns : [];
+  for (const rx of patterns) {
+    try {
+      const re = new RegExp(rx, "i");
+      const m = src.match(re);
+      if (!m) continue;
+      return {
+        ruleId: "2.11",
+        reason: "Распространение личной информации",
+        word: m[0] || "personal-info"
+      };
+    } catch {}
+  }
+
+  const contains = Array.isArray(cfg.contains) ? cfg.contains : [];
+  for (const marker of contains) {
+    if (marker && low.includes(String(marker).toLowerCase())) {
+      return {
+        ruleId: "2.11",
+        reason: "Распространение личной информации",
+        word: String(marker)
+      };
+    }
+  }
+
+  return null;
+}
+
+function detectChatViolation(text) {
+  return detectRule211Violation(text) || detectBadWordInText(text);
+}
+
 /* ================== SAFE MODE: DISABLE CHUNK PARSING ================== */
 function disableChunkParsing(bot) {
   const c = bot?._client;
@@ -331,6 +407,7 @@ async function connectMC() {
   loginSent = false;
   registerSent = false;
   autoScanPrimed = false;
+  helperBridgeJoined = false;
 
   const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
 
@@ -378,6 +455,7 @@ async function connectMC() {
           tabReady = true;
           mcReady = true;
           primeAutoScan();
+          if (IS_HELPER_MODE) setTimeout(() => helperTryJoinBridge().catch(() => {}), 2000);
           console.log("[MC] READY via TAB_COMPLETE");
         }
       } catch {}
@@ -390,6 +468,7 @@ async function connectMC() {
       if (mc && mc.entity) {
         mcReady = true;
         primeAutoScan();
+        if (IS_HELPER_MODE) setTimeout(() => helperTryJoinBridge().catch(() => {}), 1500);
         console.log("[MC] READY via SPAWN");
       } else {
         mcReady = false;
@@ -409,6 +488,24 @@ async function connectMC() {
       setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
     }
   });
+
+  if (IS_HELPER_MODE) {
+    mc.on("messagestr", async (msg) => {
+      const parsed = parseHelperChatMessage(msg);
+      if (!parsed) return;
+
+      helperPushChatLine(`${parsed.nick}: ${parsed.message}`);
+
+      const violation = detectChatViolation(parsed.message);
+      if (!violation) return;
+
+      try {
+        await sendHelperAlert(parsed.nick, violation, parsed.message);
+      } catch (e) {
+        console.log("[HELPER] alert send error:", String(e?.message || e));
+      }
+    });
+  }
 
   const onDisconnect = (reason) => {
     mcReady = false;
@@ -432,6 +529,244 @@ async function connectMC() {
 }
 
 connectMC().catch((e) => console.log("[MC] connect error:", e?.message || e));
+
+/* ================== HELPER MODE ================== */
+let helperChatLogs = [];
+let helperScanAlerts = 0;
+let helperBridgeNumber = HELPER_BRIDGE_NUMBER;
+let helperBridgeJoined = false;
+
+function helperPushChatLine(line) {
+  helperChatLogs.push(`[${new Date().toISOString()}] ${line}`);
+  if (helperChatLogs.length > HELPER_CHAT_BUFFER) {
+    helperChatLogs = helperChatLogs.slice(-HELPER_CHAT_BUFFER);
+  }
+}
+
+function helperExtractItemText(item) {
+  if (!item) return "";
+  const parts = [];
+  if (item.displayName) parts.push(String(item.displayName));
+  if (item.name) parts.push(String(item.name));
+  try {
+    const nbt = JSON.stringify(item.nbt || {});
+    if (nbt) parts.push(nbt);
+  } catch {}
+  return parts.join(" ").toLowerCase();
+}
+
+function helperFindSlotByKeywords(window, keywords = []) {
+  if (!window?.slots) return -1;
+  for (let i = 0; i < window.slots.length; i++) {
+    const txt = helperExtractItemText(window.slots[i]);
+    if (!txt) continue;
+    if (keywords.some((v) => txt.includes(v))) return i;
+  }
+  return -1;
+}
+
+function helperFindBridgeHubSlot(window) {
+  return helperFindSlotByKeywords(window, ["bridging", "бридж", "тренировк"]);
+}
+
+function helperFindBridgeServerSlot(window, bridgeNumber) {
+  const n = Number(bridgeNumber);
+  return helperFindSlotByKeywords(window, [
+    `fastbridge-${n}`,
+    `fast bridge-${n}`,
+    `fastbridge ${n}`,
+    `bridge-${n}`,
+    `bridge ${n}`,
+    `бридж ${n}`,
+    `№${n}`
+  ]);
+}
+
+async function helperTryJoinBridge() {
+  if (!IS_HELPER_MODE || !mcReady || !mc) return;
+  if (helperBridgeJoined) return;
+
+  try { mc.chat(`/bridge ${helperBridgeNumber}`); } catch {}
+  try { mc.chat(`/join fastbridge-${helperBridgeNumber}`); } catch {}
+
+  try {
+    mc.activateItem();
+  } catch {}
+
+  const startedAt = Date.now();
+  const maxMs = 12000;
+
+  const onWindowOpen = async (window) => {
+    try {
+      const serverSlot = helperFindBridgeServerSlot(window, helperBridgeNumber);
+      if (serverSlot >= 0) {
+        await mc.clickWindow(serverSlot, 0, 0);
+        helperBridgeJoined = true;
+        mc.removeListener("windowOpen", onWindowOpen);
+        return;
+      }
+
+      const hubSlot = helperFindBridgeHubSlot(window);
+      if (hubSlot >= 0) {
+        await mc.clickWindow(hubSlot, 0, 0);
+        return;
+      }
+
+      if (Date.now() - startedAt > maxMs) {
+        mc.removeListener("windowOpen", onWindowOpen);
+      }
+    } catch (e) {
+      console.log("[HELPER] bridge select error:", String(e?.message || e));
+      mc.removeListener("windowOpen", onWindowOpen);
+    }
+  };
+
+  mc.on("windowOpen", onWindowOpen);
+  setTimeout(() => {
+    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
+  }, maxMs);
+}
+
+async function helperScreenshotBuffer(lines) {
+  const width = 1200;
+  const height = 720;
+  const data = Buffer.alloc(width * height * 4, 255);
+
+  const putPixel = (x, y, r, g, b) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    const i = (y * width + x) * 4;
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+    data[i + 3] = 255;
+  };
+
+  const drawRect = (x, y, w, h, r, g, b) => {
+    for (let yy = y; yy < y + h; yy++) {
+      for (let xx = x; xx < x + w; xx++) putPixel(xx, yy, r, g, b);
+    }
+  };
+
+  const drawTextLike = (x, y, text, type = "normal") => {
+    let cursor = x;
+    for (const ch of String(text)) {
+      if (cursor > width - 10) break;
+      if (ch === " ") {
+        cursor += 7;
+        continue;
+      }
+      const color = type === "title" ? [80, 190, 255] : type === "alert" ? [255, 120, 120] : [220, 220, 220];
+      drawRect(cursor, y, 5, 8, color[0], color[1], color[2]);
+      cursor += 7;
+    }
+  };
+
+  drawRect(0, 0, width, height, 17, 22, 28);
+  drawRect(0, 0, width, 44, 28, 38, 48);
+  drawTextLike(20, 16, "TABSCAN HELPER MODE SNAPSHOT", "title");
+
+  let y = 70;
+  for (const line of lines.slice(-26)) {
+    drawTextLike(24, y, line, line.includes("ALERT") ? "alert" : "normal");
+    y += 22;
+    if (y > height - 16) break;
+  }
+
+  const chunks = [];
+  const crcTable = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+
+  const chunk = (type, chunkData) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(chunkData.length, 0);
+    const t = Buffer.from(type);
+    const crcBuf = Buffer.concat([t, chunkData]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(crcBuf), 0);
+    chunks.push(Buffer.concat([len, t, chunkData, crc]));
+  };
+
+  const sig = Buffer.from([137,80,78,71,13,10,26,10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  chunk("IHDR", ihdr);
+
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y0 = 0; y0 < height; y0++) {
+    const rowStart = y0 * (stride + 1);
+    raw[rowStart] = 0;
+    data.copy(raw, rowStart + 1, y0 * stride, y0 * stride + stride);
+  }
+
+  const { deflateSync } = await import("zlib");
+  const compressed = deflateSync(raw, { level: 9 });
+  chunk("IDAT", compressed);
+  chunk("IEND", Buffer.alloc(0));
+
+  return Buffer.concat([sig, ...chunks]);
+}
+
+async function sendHelperAlert(nick, violation, messageText) {
+  if (!CHAT_ID) return;
+
+  const alertLine = `ALERT ${nick}: ${messageText}`;
+  helperPushChatLine(alertLine);
+
+  const screenshotPath = `helper-chat-${Date.now()}.png`;
+  const screenshot = await helperScreenshotBuffer([
+    `Server: ${MC_HOST}:${MC_PORT} (bridge ${helperBridgeNumber})`,
+    `Violation: ${violation.reason} (${violation.ruleId})`,
+    `Word: ${violation.word}`,
+    `Nick: ${nick}`,
+    `Message: ${messageText}`,
+    ...helperChatLogs
+  ]);
+  fs.writeFileSync(screenshotPath, screenshot);
+
+  const text = [
+    `🚨 Обнаружено нарушение в helper mode`,
+    `Ник: ${nick}`,
+    `Правило: ${violation.reason} (${violation.ruleId})`,
+    `Слово: ${violation.word}`,
+    `Сообщение: ${messageText}`,
+    `Bridge: ${helperBridgeNumber}`
+  ].join("\n");
+
+  await safeSend(CHAT_ID, text);
+  await tg.telegram.sendPhoto(CHAT_ID, { source: screenshotPath }, { caption: `Скрин чата: ${nick}` });
+  helperScanAlerts += 1;
+}
+
+function parseHelperChatMessage(rawLine = "") {
+  const line = String(rawLine).replace(/§./g, "").trim();
+  if (!line) return null;
+
+  let match = line.match(/^<([^>]{1,32})>\s+(.+)$/);
+  if (match) return { nick: match[1], message: match[2] };
+
+  match = line.match(/^\[.+?\]\s*([^:\s]{1,32})\s*:\s*(.+)$/);
+  if (match) return { nick: match[1], message: match[2] };
+
+  return null;
+}
 
 /* ================== SCAN HELPERS ================== */
 function clean(s) { return String(s).replace(/[^A-Za-z0-9_]/g, ""); }
@@ -564,6 +899,7 @@ function menuKeyboard() {
   ]);
 }
 
+if (IS_MODERATION_MODE) {
 /* ================== COMMANDS (РѕСЃС‚Р°РІР»СЏРµРј) ================== */
 tg.start((c) => c.reply("Р“РѕС‚РѕРІ.\n/tab <РїСЂРµС„РёРєСЃ>\n/tabcheck <РїСЂРµС„РёРєСЃ>\n/scanall\n/status", menuKeyboard()));
 
@@ -782,6 +1118,49 @@ function primeAutoScan() {
 if (AUTO_SCAN) {
   scheduleNextAutoScan();
 }
+
+} else {
+  tg.start((c) => c.reply(`Helper mode активен.
+Сервер: ${MC_HOST}:${MC_PORT}
+Сканирую чат на нарушения и отправляю алерты в CHAT_ID.\nПравила helper: ${HELPER_RULES_FILE}`));
+
+  tg.command("status", (c) => {
+    const lines = [
+      `Mode: helper`,
+      `MC статус: ${formatMcStatus()}`,
+      `Сервер: ${MC_HOST}:${MC_PORT}`,
+      `Bridge: ${helperBridgeNumber}`,
+      `Helper rules: ${HELPER_RULES_FILE}`,
+      `Алертов отправлено: ${helperScanAlerts}`,
+      `Буфер чата: ${helperChatLogs.length}/${HELPER_CHAT_BUFFER}`
+    ];
+    c.reply(lines.join("\n"));
+  });
+
+
+  tg.command("reload_helper_rules", async (c) => {
+    try {
+      reloadHelperRules();
+      await c.reply(`✅ helper rules перезагружены: ${HELPER_RULES_FILE}`);
+    } catch (e) {
+      await c.reply("❌ helper rules reload error: " + String(e?.message || e));
+    }
+  });
+
+  tg.command("bridge", async (c) => {
+    const raw = String(c.message.text || "").split(" ").slice(1).join(" ").trim();
+    const next = Number(raw);
+    if (!Number.isInteger(next) || next < 1 || next > 4) {
+      return c.reply("Используй: /bridge 1|2|3|4 (это fastbridge-N)");
+    }
+
+    helperBridgeNumber = next;
+    helperBridgeJoined = false;
+    await c.reply(`Ок, выбрал bridge ${helperBridgeNumber}. Пробую переключиться...`);
+    await helperTryJoinBridge().catch(() => {});
+  });
+}
+
 /* ================== START ================== */
 (async () => {
   await launchTelegramSafely();
