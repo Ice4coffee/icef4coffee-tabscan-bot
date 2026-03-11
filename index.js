@@ -1,8 +1,3 @@
-diff --git a/index.js b/index.js
-index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..4e95738b794f1e1c7ed9fd594ec451eafc44fb7f 100644
---- a/index.js
-+++ b/index.js
-@@ -1,795 +1,1174 @@
 -import fs from "fs";
 -import mineflayer from "mineflayer";
 -import { Telegraf, Markup } from "telegraf";
@@ -1972,3 +1967,4 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..4e95738b794f1e1c7ed9fd594ec451ea
 +
 +
 +
+
