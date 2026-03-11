@@ -451,10 +451,45 @@ let helperJoinInProgress = false;
 let helperJoinTimer = null;
 let helperJoinAttempts = 0;
 let helperRecentAlerts = new Map();
+let sidebarLines = [];
+let helperInBridging = false;
 
 // viewer state
 let viewerStarted = false;
 let viewerBotRef = null;
+
+/* ================== SIDEBAR DETECT ================== */
+function stripMcFormatting(s = "") {
+  return String(s).replace(/§./g, "").trim();
+}
+
+function resetSidebarState() {
+  sidebarLines = [];
+  helperInBridging = false;
+}
+
+function updateHelperPresenceFromText(text = "") {
+  const t = stripMcFormatting(text).toLowerCase();
+  if (
+    t.includes("bridging") ||
+    t.includes("fastbridge") ||
+    t.includes("bridge-") ||
+    t.includes("bridge ")
+  ) {
+    helperInBridging = true;
+  }
+}
+
+function helperLooksInBridging() {
+  if (helperInBridging) return true;
+
+  const joined = sidebarLines.join(" ").toLowerCase();
+  return (
+    joined.includes("bridging") ||
+    joined.includes("fastbridge") ||
+    joined.includes("bridge")
+  );
+}
 
 /* ================== TAB COMPLETE ================== */
 function tabComplete(bot, text) {
@@ -606,22 +641,6 @@ function helperExtractItemText(item) {
   return parts.join(" ").toLowerCase();
 }
 
-function helperFindSlotByMatchers(window, matchers = []) {
-  if (!window?.slots) return -1;
-
-  for (let i = 0; i < window.slots.length; i++) {
-    const txt = helperExtractItemText(window.slots[i]);
-    if (!txt) continue;
-
-    for (const m of matchers) {
-      if (typeof m === "string" && txt.includes(m.toLowerCase())) return i;
-      if (m instanceof RegExp && m.test(txt)) return i;
-    }
-  }
-
-  return -1;
-}
-
 function helperFindCompassInHotbar() {
   if (!mc?.inventory?.slots) return -1;
 
@@ -631,6 +650,8 @@ function helperFindCompassInHotbar() {
 
     const txt = helperExtractItemText(item);
     const name = String(item.name || "").toLowerCase();
+
+    console.log("[HELPER] hotbar slot", slot, "item:", name, txt);
 
     if (
       name.includes("compass") ||
@@ -662,52 +683,6 @@ async function helperUseCompass() {
   console.log("[HELPER] compass used from slot", hotbarSlot);
 }
 
-async function helperClickRedWoolFlow(window) {
-  const slot = helperFindSlotByMatchers(window, [
-    "red_wool",
-    "red wool",
-    "красная шерсть",
-    "шерсть",
-    "bridging",
-    "bridge",
-    "бридж",
-    "тренировки"
-  ]);
-
-  if (slot >= 0) {
-    await sleep(250);
-    await mc.clickWindow(slot, 0, 0);
-    console.log("[HELPER] clicked first red wool / bridge menu, slot:", slot);
-    return true;
-  }
-
-  return false;
-}
-
-async function helperClickFastBridgeWindow(window) {
-  const slot = helperFindSlotByMatchers(window, [
-    `fastbridge-${helperBridgeNumber}`,
-    `fast bridge ${helperBridgeNumber}`,
-    `fastbridge ${helperBridgeNumber}`,
-    `bridge ${helperBridgeNumber}`,
-    "fastbridge",
-    "fast bridge",
-    "red_wool",
-    "red wool",
-    "красная шерсть",
-    "тренировки"
-  ]);
-
-  if (slot >= 0) {
-    await sleep(250);
-    await mc.clickWindow(slot, 0, 0);
-    console.log("[HELPER] clicked fastbridge slot:", slot);
-    return true;
-  }
-
-  return false;
-}
-
 function stopHelperJoinLoop() {
   helperJoinInProgress = false;
   if (helperJoinTimer) {
@@ -731,21 +706,22 @@ function scheduleHelperJoinRetry(delay = 2500) {
 
 async function helperTryJoinBridge() {
   if (!isHelperMode() || !mcReady || !mc) return;
-  if (helperBridgeJoined) return;
   if (helperJoinInProgress) return;
 
-  helperJoinInProgress = true;
-  helperJoinAttempts += 1;
-  console.log(`[HELPER] join attempt #${helperJoinAttempts}`);
+  if (helperLooksInBridging()) {
+    helperBridgeJoined = true;
+    console.log("[HELPER] already in bridging");
+    return;
+  }
 
-  const startedAt = Date.now();
-  const maxMs = 15000;
-  let stage = 0;
-  let clickedAnything = false;
+  helperJoinInProgress = true;
+  helperJoinAttempts++;
+
+  console.log("[HELPER] join attempt", helperJoinAttempts);
 
   const cleanup = () => {
-    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
     helperJoinInProgress = false;
+    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
   };
 
   const success = () => {
@@ -753,87 +729,101 @@ async function helperTryJoinBridge() {
     helperJoinAttempts = 0;
     cleanup();
     stopHelperJoinLoop();
-    console.log("[HELPER] successfully joined fastbridge");
+    console.log("[HELPER] joined fastbridge");
   };
 
   const fail = () => {
     cleanup();
-    if (!helperBridgeJoined) {
-      console.log("[HELPER] failed to join, scheduling retry...");
-      scheduleHelperJoinRetry(3000);
-    }
+    helperBridgeJoined = false;
+    console.log("[HELPER] join failed → retry");
+    scheduleHelperJoinRetry(4000);
   };
 
   const onWindowOpen = async (window) => {
     try {
-      if (!isHelperMode()) return;
-
       const title = stripColors(window?.title || "");
-      console.log("[HELPER] windowOpen:", title || "no-title");
+      console.log("[HELPER] window:", title);
 
-      if (stage === 0) {
-        const ok = await helperClickRedWoolFlow(window);
-        if (ok) {
-          clickedAnything = true;
-          stage = 1;
-          return;
+      if (window?.slots) {
+        for (let i = 0; i < window.slots.length; i++) {
+          const item = window.slots[i];
+          if (!item) continue;
+          console.log("[HELPER] slot", i, "item:", item.name, helperExtractItemText(item));
         }
       }
 
-      if (stage === 1) {
-        const ok = await helperClickFastBridgeWindow(window);
-        if (ok) {
-          clickedAnything = true;
-          stage = 2;
-          setTimeout(() => success(), 1500);
-          return;
-        }
+      // первое меню: Bridging в слоте 13
+      if (title.toLowerCase().includes("меню") || title.toLowerCase().includes("game")) {
+        console.log("[HELPER] clicking Bridging slot 13");
+        await sleep(300);
+        await mc.clickWindow(13, 0, 0);
+        return;
       }
 
-      if (Date.now() - startedAt > maxMs) {
-        fail();
+      // второе меню: fastbridge слоты
+      if (title.toLowerCase().includes("bridging")) {
+        const slotMap = {
+          1: 11,
+          2: 13,
+          3: 15,
+          4: 17
+        };
+
+        const slot = slotMap[helperBridgeNumber] || 11;
+        console.log("[HELPER] clicking fastbridge slot", slot);
+
+        await sleep(300);
+        await mc.clickWindow(slot, 0, 0);
+
+        setTimeout(() => {
+          if (helperLooksInBridging()) {
+            success();
+          } else {
+            fail();
+          }
+        }, 2500);
+
+        return;
       }
     } catch (e) {
-      console.log("[HELPER] window flow error:", e?.message || e);
-      fail();
+      console.log("[HELPER] window error:", e?.message || e);
     }
   };
 
   mc.on("windowOpen", onWindowOpen);
 
   try {
-    await sleep(1200);
+    await sleep(2000);
 
-    let compassSlot = helperFindCompassInHotbar();
-    if (compassSlot === -1) {
-      await sleep(1500);
-      compassSlot = helperFindCompassInHotbar();
+    if (helperLooksInBridging()) {
+      success();
+      return;
     }
 
-    if (compassSlot === -1) {
-      console.log("[HELPER] compass still not found");
+    const compass = helperFindCompassInHotbar();
+    if (compass === -1) {
+      console.log("[HELPER] compass not found");
       fail();
       return;
     }
 
     await helperUseCompass();
-    clickedAnything = true;
 
     setTimeout(() => {
-      if (!helperBridgeJoined) {
+      if (!helperLooksInBridging()) {
         try { mc.chat(`/bridge ${helperBridgeNumber}`); } catch {}
-        try { mc.chat(`/join fastbridge-${helperBridgeNumber}`); } catch {}
       }
     }, 5000);
 
     setTimeout(() => {
-      if (!helperBridgeJoined) {
-        if (!clickedAnything) console.log("[HELPER] nothing clicked");
+      if (helperLooksInBridging()) {
+        success();
+      } else {
         fail();
       }
-    }, maxMs);
+    }, 9000);
   } catch (e) {
-    console.log("[HELPER] helperTryJoinBridge error:", e?.message || e);
+    console.log("[HELPER] join error:", e?.message || e);
     fail();
   }
 }
@@ -915,6 +905,8 @@ function resetMcStateForReconnect() {
     helperJoinTimer = null;
   }
 
+  resetSidebarState();
+
   if (isHelperMode()) {
     viewerStarted = false;
     viewerBotRef = null;
@@ -979,6 +971,40 @@ async function connectMC() {
     return;
   }
 
+  resetSidebarState();
+
+  const client = mc._client;
+  if (client) {
+    client.on("scoreboard_objective", (packet) => {
+      try {
+        if (packet?.displayText) updateHelperPresenceFromText(packet.displayText);
+        if (packet?.name) updateHelperPresenceFromText(packet.name);
+      } catch {}
+    });
+
+    client.on("scoreboard_display_objective", () => {});
+
+    client.on("scoreboard_score", (packet) => {
+      try {
+        if (packet?.itemName) {
+          const text = stripMcFormatting(packet.itemName);
+          if (text) {
+            sidebarLines.push(text);
+            if (sidebarLines.length > 30) sidebarLines = sidebarLines.slice(-30);
+            updateHelperPresenceFromText(text);
+          }
+        }
+      } catch {}
+    });
+
+    client.on("teams", (packet) => {
+      try {
+        if (packet?.prefix) updateHelperPresenceFromText(packet.prefix);
+        if (packet?.suffix) updateHelperPresenceFromText(packet.suffix);
+      } catch {}
+    });
+  }
+
   mc.on("login", () => {
     disableChunkParsing(mc);
 
@@ -1024,8 +1050,8 @@ async function connectMC() {
 
           if (isHelperMode()) {
             await startViewerIfNeeded();
-            setTimeout(() => helperTryJoinBridge().catch(() => {}), 2500);
-            scheduleHelperJoinRetry(7000);
+            setTimeout(() => helperTryJoinBridge().catch(() => {}), 5000);
+            scheduleHelperJoinRetry(12000);
           }
         }
       } catch {}
@@ -1045,8 +1071,8 @@ async function connectMC() {
 
         if (isHelperMode()) {
           await startViewerIfNeeded();
-          setTimeout(() => helperTryJoinBridge().catch(() => {}), 2500);
-          scheduleHelperJoinRetry(7000);
+          setTimeout(() => helperTryJoinBridge().catch(() => {}), 5000);
+          scheduleHelperJoinRetry(12000);
         }
       } else {
         mcReady = false;
@@ -1062,6 +1088,32 @@ async function connectMC() {
 
     console.log("[CHAT]", plain);
     helperPushChatLine(plain);
+    updateHelperPresenceFromText(plain);
+
+    if (isHelperMode()) {
+      const low = plain.toLowerCase();
+
+      if (
+        low.includes("bridging") ||
+        low.includes("fastbridge") ||
+        low.includes("bridge-") ||
+        low.includes("bridge ")
+      ) {
+        helperInBridging = true;
+        helperBridgeJoined = true;
+      }
+
+      if (
+        low.includes("лобби") ||
+        low.includes("hub") ||
+        low.includes("добро пожаловать")
+      ) {
+        if (!helperLooksInBridging()) {
+          helperBridgeJoined = false;
+          scheduleHelperJoinRetry(2500);
+        }
+      }
+    }
 
     if (
       cfg.password &&
@@ -1106,25 +1158,6 @@ async function connectMC() {
     }
 
     if (isHelperMode()) {
-      const low = plain.toLowerCase();
-
-      if (
-        low.includes("лобби") ||
-        low.includes("hub") ||
-        low.includes("вы вернулись") ||
-        low.includes("добро пожаловать")
-      ) {
-        if (!helperBridgeJoined) scheduleHelperJoinRetry(2000);
-      }
-
-      if (
-        low.includes(`fastbridge-${helperBridgeNumber}`) ||
-        low.includes("присоединился к серверу") ||
-        low.includes("подключился")
-      ) {
-        helperBridgeJoined = true;
-      }
-
       const parsed = parseHelperChatMessage(raw);
       if (!parsed) return;
 
@@ -1299,6 +1332,7 @@ function formatStatusText() {
     lines.push(`Алертов helper: ${helperScanAlerts}`);
     lines.push(`Буфер чата: ${helperChatLogs.length}/${HELPER_CHAT_BUFFER}`);
     lines.push(`Helper rules: ${HELPER_RULES_FILE}`);
+    lines.push(`In Bridging: ${helperLooksInBridging() ? "✅ да" : "❌ нет"}`);
   }
 
   if (mcLastError) lines.push(`Причина: ${mcLastError}`);
@@ -1423,6 +1457,7 @@ tg.command("bridge", async (c) => {
 
   helperBridgeNumber = next;
   helperBridgeJoined = false;
+  helperInBridging = false;
   await c.reply(`Ок, выбрал bridge ${helperBridgeNumber}. Пробую переключиться...`, menuKeyboard());
   await helperTryJoinBridge().catch(() => {});
 });
