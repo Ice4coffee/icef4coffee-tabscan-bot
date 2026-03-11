@@ -1,8 +1,8 @@
 diff --git a/index.js b/index.js
-index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f81e9779e7 100644
+index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..4e95738b794f1e1c7ed9fd594ec451eafc44fb7f 100644
 --- a/index.js
 +++ b/index.js
-@@ -1,795 +1,1150 @@
+@@ -1,795 +1,1174 @@
 -import fs from "fs";
 -import mineflayer from "mineflayer";
 -import { Telegraf, Markup } from "telegraf";
@@ -815,8 +815,6 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +const MC_HOST = (process.env.MC_HOST || "").trim();
 +const MC_PORT = Number(process.env.MC_PORT || 25565);
 +const MC_USER = process.env.MC_USER;
-+const HELPER_MC_HOST = (process.env.HELPER_MC_HOST || "1.2.3.4").trim();
-+const HELPER_MC_PORT = Number(process.env.HELPER_MC_PORT || 25565);
 +const HELPER_CHAT_BUFFER = Number(process.env.HELPER_CHAT_BUFFER || 40);
 +const HELPER_BRIDGE_NUMBER = Math.min(4, Math.max(1, Number(process.env.HELPER_BRIDGE_NUMBER || 1)));
 +const HELPER_RULES_FILE = (process.env.HELPER_RULES_FILE || "helper-rules.json").trim();
@@ -839,8 +837,8 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +const AI_MIN_CONF_FOR_BAN = Number(process.env.AI_MIN_CONF_FOR_BAN || 0.75);
 +const AI_MIN_CONF_FOR_OK = Number(process.env.AI_MIN_CONF_FOR_OK || 0.75);
 +
-+if (!BOT_TOKEN || !MC_USER || (IS_MODERATION_MODE && !MC_HOST)) {
-+  throw new Error("Нужны BOT_TOKEN, MC_USER и MC_HOST (в moderation mode)");
++if (!BOT_TOKEN || !MC_USER || !MC_HOST) {
++  throw new Error("Нужны BOT_TOKEN, MC_USER и MC_HOST");
 +}
 +
 +/* ================== TELEGRAM BOT ================== */
@@ -1211,9 +1209,7 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +  autoScanPrimed = false;
 +  helperBridgeJoined = false;
 +
-+  const targetHost = IS_HELPER_MODE ? HELPER_MC_HOST : MC_HOST;
-+  const targetPort = IS_HELPER_MODE ? HELPER_MC_PORT : MC_PORT;
-+  const ep = await resolveMcEndpoint(targetHost, targetPort);
++  const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
 +
 +  console.log("[MC DEBUG]", {
 +    inputHost: MC_HOST,
@@ -1359,48 +1355,76 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +  return parts.join(" ").toLowerCase();
 +}
 +
-+function helperFindBridgeSlot(window, bridgeNumber) {
++function helperFindSlotByKeywords(window, keywords = []) {
 +  if (!window?.slots) return -1;
-+  const variants = [
-+    `бридж ${bridgeNumber}`,
-+    `bridge ${bridgeNumber}`,
-+    `№${bridgeNumber}`,
-+    `${bridgeNumber}`
-+  ];
-+
 +  for (let i = 0; i < window.slots.length; i++) {
 +    const txt = helperExtractItemText(window.slots[i]);
 +    if (!txt) continue;
-+    if (variants.some((v) => txt.includes(v))) return i;
++    if (keywords.some((v) => txt.includes(v))) return i;
 +  }
 +  return -1;
++}
++
++function helperFindBridgeHubSlot(window) {
++  return helperFindSlotByKeywords(window, ["bridging", "бридж", "тренировк"]);
++}
++
++function helperFindBridgeServerSlot(window, bridgeNumber) {
++  const n = Number(bridgeNumber);
++  return helperFindSlotByKeywords(window, [
++    `fastbridge-${n}`,
++    `fast bridge-${n}`,
++    `fastbridge ${n}`,
++    `bridge-${n}`,
++    `bridge ${n}`,
++    `бридж ${n}`,
++    `№${n}`
++  ]);
 +}
 +
 +async function helperTryJoinBridge() {
 +  if (!IS_HELPER_MODE || !mcReady || !mc) return;
 +  if (helperBridgeJoined) return;
 +
-+  try {
-+    mc.chat(`/bridge ${helperBridgeNumber}`);
-+  } catch {}
++  try { mc.chat(`/bridge ${helperBridgeNumber}`); } catch {}
++  try { mc.chat(`/join fastbridge-${helperBridgeNumber}`); } catch {}
 +
 +  try {
 +    mc.activateItem();
 +  } catch {}
 +
++  const startedAt = Date.now();
++  const maxMs = 12000;
++
 +  const onWindowOpen = async (window) => {
 +    try {
-+      const slot = helperFindBridgeSlot(window, helperBridgeNumber);
-+      if (slot >= 0) {
-+        await mc.clickWindow(slot, 0, 0);
++      const serverSlot = helperFindBridgeServerSlot(window, helperBridgeNumber);
++      if (serverSlot >= 0) {
++        await mc.clickWindow(serverSlot, 0, 0);
 +        helperBridgeJoined = true;
++        mc.removeListener("windowOpen", onWindowOpen);
++        return;
++      }
++
++      const hubSlot = helperFindBridgeHubSlot(window);
++      if (hubSlot >= 0) {
++        await mc.clickWindow(hubSlot, 0, 0);
++        return;
++      }
++
++      if (Date.now() - startedAt > maxMs) {
++        mc.removeListener("windowOpen", onWindowOpen);
 +      }
 +    } catch (e) {
 +      console.log("[HELPER] bridge select error:", String(e?.message || e));
++      mc.removeListener("windowOpen", onWindowOpen);
 +    }
 +  };
 +
-+  mc.once("windowOpen", onWindowOpen);
++  mc.on("windowOpen", onWindowOpen);
++  setTimeout(() => {
++    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
++  }, maxMs);
 +}
 +
 +async function helperScreenshotBuffer(lines) {
@@ -1508,7 +1532,7 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +
 +  const screenshotPath = `helper-chat-${Date.now()}.png`;
 +  const screenshot = await helperScreenshotBuffer([
-+    `Server: ${HELPER_MC_HOST}:${HELPER_MC_PORT} (bridge ${helperBridgeNumber})`,
++    `Server: ${MC_HOST}:${MC_PORT} (bridge ${helperBridgeNumber})`,
 +    `Violation: ${violation.reason} (${violation.ruleId})`,
 +    `Word: ${violation.word}`,
 +    `Nick: ${nick}`,
@@ -1897,14 +1921,14 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +
 +} else {
 +  tg.start((c) => c.reply(`Helper mode активен.
-+Сервер: ${HELPER_MC_HOST}:${HELPER_MC_PORT}
++Сервер: ${MC_HOST}:${MC_PORT}
 +Сканирую чат на нарушения и отправляю алерты в CHAT_ID.\nПравила helper: ${HELPER_RULES_FILE}`));
 +
 +  tg.command("status", (c) => {
 +    const lines = [
 +      `Mode: helper`,
 +      `MC статус: ${formatMcStatus()}`,
-+      `Сервер: ${HELPER_MC_HOST}:${HELPER_MC_PORT}`,
++      `Сервер: ${MC_HOST}:${MC_PORT}`,
 +      `Bridge: ${helperBridgeNumber}`,
 +      `Helper rules: ${HELPER_RULES_FILE}`,
 +      `Алертов отправлено: ${helperScanAlerts}`,
@@ -1927,7 +1951,7 @@ index 5d2cd7a8053137d8dd9d9ac45fad11ce86f19704..7780099a4b0ad44a0d6a8c0b2466d3f8
 +    const raw = String(c.message.text || "").split(" ").slice(1).join(" ").trim();
 +    const next = Number(raw);
 +    if (!Number.isInteger(next) || next < 1 || next > 4) {
-+      return c.reply("Используй: /bridge 1|2|3|4");
++      return c.reply("Используй: /bridge 1|2|3|4 (это fastbridge-N)");
 +    }
 +
 +    helperBridgeNumber = next;
