@@ -10,32 +10,30 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
 
-// Базовые MC env (по умолчанию moderation)
+// default mode
+let currentMode = (process.env.BOT_MODE || "moderation").trim().toLowerCase();
+if (!["moderation", "helper"].includes(currentMode)) currentMode = "moderation";
+
+// moderation connection
 const MC_HOST = (process.env.MC_HOST || "").trim();
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = (process.env.MC_USER || "").trim();
 const MC_PASSWORD = process.env.MC_PASSWORD || "";
 const MC_VERSION = process.env.MC_VERSION || "1.8.9";
 
-// Helper env (если не заданы — fallback на обычные)
+// helper connection (fallback on moderation env)
 const HELPER_MC_HOST = (process.env.HELPER_MC_HOST || MC_HOST || "").trim();
 const HELPER_MC_PORT = Number(process.env.HELPER_MC_PORT || MC_PORT || 25565);
 const HELPER_MC_USER = (process.env.HELPER_MC_USER || MC_USER || "").trim();
 const HELPER_MC_PASSWORD = process.env.HELPER_MC_PASSWORD || MC_PASSWORD || "";
 const HELPER_MC_VERSION = process.env.HELPER_MC_VERSION || MC_VERSION || "1.8.9";
 
-// Режим по умолчанию
-let currentMode = (process.env.BOT_MODE || "moderation").trim().toLowerCase();
-if (!["moderation", "helper"].includes(currentMode)) currentMode = "moderation";
-
-// moderation scan env
 const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim();
 const READY_AFTER_MS = Number(process.env.READY_AFTER_MS || 1500);
 
-// helper env
 const HELPER_CHAT_BUFFER = Number(process.env.HELPER_CHAT_BUFFER || 40);
 const HELPER_BRIDGE_NUMBER_DEFAULT = Math.min(4, Math.max(1, Number(process.env.HELPER_BRIDGE_NUMBER || 1)));
 const HELPER_RULES_FILE = (process.env.HELPER_RULES_FILE || "helper-rules.json").trim();
@@ -50,14 +48,10 @@ const AI_DELAY_MS = Number(process.env.AI_DELAY_MS || 350);
 const AI_MIN_CONF_FOR_BAN = Number(process.env.AI_MIN_CONF_FOR_BAN || 0.75);
 const AI_MIN_CONF_FOR_OK = Number(process.env.AI_MIN_CONF_FOR_OK || 0.75);
 
-if (!BOT_TOKEN) {
-  throw new Error("Нужен BOT_TOKEN");
-}
-if (!MC_HOST || !MC_USER) {
-  throw new Error("Нужны MC_HOST и MC_USER");
-}
+if (!BOT_TOKEN) throw new Error("Нужен BOT_TOKEN");
+if (!MC_HOST || !MC_USER) throw new Error("Нужны MC_HOST и MC_USER");
 
-/* ================== UTIL ================== */
+/* ================== HELPERS ================== */
 const tg = new Telegraf(BOT_TOKEN);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -98,7 +92,7 @@ async function safeSend(chatId, text, extra) {
     await tg.telegram.sendMessage(chatId, text, extra);
     return true;
   } catch (e) {
-    console.log("[TG] sendMessage error:", e?.message || e);
+    console.log("[TG] send error:", e?.message || e);
     return false;
   }
 }
@@ -136,7 +130,7 @@ tg.catch((err) => {
   console.log("⚠️ TG handler error:", err?.message || err);
 });
 
-/* ================== TG LAUNCH ================== */
+/* ================== TG START SAFE ================== */
 async function launchTelegramSafely() {
   while (true) {
     try {
@@ -150,7 +144,7 @@ async function launchTelegramSafely() {
     } catch (e) {
       const msg = String(e?.message || e);
       if (msg.includes("409") || msg.includes("Conflict")) {
-        console.log("⚠️ 409 Conflict — другой инстанс getUpdates. Жду 15с...");
+        console.log("⚠️ 409 Conflict — жду 15с...");
         await sleep(15000);
         continue;
       }
@@ -173,10 +167,10 @@ function reloadHelperRules() {
   HELPER_RULES = JSON.parse(fs.readFileSync(HELPER_RULES_FILE, "utf8"));
 }
 
-/* ================== NORMALIZE ================== */
+/* ================== NORMALIZATION ================== */
 const cyr = {
-  "а":"a","е":"e","о":"o","р":"p","с":"c","х":"x","у":"y","к":"k","м":"m","т":"t",
-  "ё":"e","в":"b","н":"h"
+  "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y", "к": "k", "м": "m", "т": "t",
+  "ё": "e", "в": "b", "н": "h"
 };
 
 let invisRe, sepRe, leetMap, collapseRepeats, maxRepeat;
@@ -191,7 +185,7 @@ function rebuildNormalization() {
     "g"
   );
   leetMap = RULES?.normalization?.leet_map || {
-    "0":"o","1":"i","3":"e","4":"a","5":"s","6":"b","7":"t","8":"b","9":"g","@":"a","$":"s"
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "6": "b", "7": "t", "8": "b", "9": "g", "@": "a", "$": "s"
   };
   collapseRepeats = RULES?.normalization?.collapse_repeats ?? true;
   maxRepeat = RULES?.normalization?.max_repeat ?? 2;
@@ -204,7 +198,6 @@ function norm(s = "") {
   s = s.replace(invisRe, "");
   s = [...s].map(ch => cyr[ch] || leetMap[ch] || ch).join("");
   s = s.replace(sepRe, "");
-
   if (collapseRepeats) {
     const re = new RegExp(`(.)\\1{${maxRepeat},}`, "g");
     s = s.replace(re, "$1".repeat(maxRepeat));
@@ -253,17 +246,13 @@ function report(title, names) {
 
   if (ban.length) {
     out += `❌ BAN (${ban.length}):\n`;
-    ban.forEach((x, i) => {
-      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
-    });
+    ban.forEach((x, i) => { out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`; });
     out += "\n";
   }
 
   if (rev.length) {
     out += `⚠️ REVIEW (${rev.length}):\n`;
-    rev.forEach((x, i) => {
-      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
-    });
+    rev.forEach((x, i) => { out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`; });
     out += "\n";
   }
 
@@ -279,15 +268,13 @@ function report(title, names) {
   };
 }
 
-/* ================== HELPER CHAT RULES ================== */
+/* ================== HELPER RULE CHECKER ================== */
 function helperNorm(s = "") {
   return norm(s);
 }
 
 function detectBadWordInText(text) {
-  const rawText = String(text || "");
-  const normalizedText = helperNorm(rawText);
-
+  const normalizedText = helperNorm(text);
   const banRules = HELPER_RULES?.ban_rules || [];
   const keywordRules = (HELPER_RULES?.keyword_rules || []).filter(r => String(r.id || "") !== "2.4");
   const allRules = [...banRules, ...keywordRules];
@@ -296,7 +283,6 @@ function detectBadWordInText(text) {
     for (const sourceWord of (rule.words || [])) {
       const w = helperNorm(String(sourceWord));
       if (!w) continue;
-
       if (normalizedText.includes(w)) {
         return {
           ruleId: rule.id || "BAN_RULE",
@@ -373,7 +359,6 @@ function detectFlood(nick, message) {
   if (!floodHistory[key]) floodHistory[key] = [];
   floodHistory[key].push({ msg, time: now });
 
-  // держим только последние 12 секунд
   floodHistory[key] = floodHistory[key].filter(x => now - x.time < 12000);
 
   const same = floodHistory[key].filter(x => x.msg === msg);
@@ -397,7 +382,7 @@ function detectChatViolation(text, nick) {
   );
 }
 
-/* ================== SRV RESOLVE ================== */
+/* ================== SRV ================== */
 async function resolveMcEndpoint(host, port) {
   const h = String(host || "").trim();
   const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(h);
@@ -416,7 +401,7 @@ async function resolveMcEndpoint(host, port) {
   return { host: h, port: Number(port || 25565), via: "DIRECT" };
 }
 
-/* ================== ACTIVE MC CONFIG ================== */
+/* ================== ACTIVE CONFIG ================== */
 function getActiveMcConfig() {
   if (isHelperMode()) {
     return {
@@ -439,7 +424,7 @@ function getActiveMcConfig() {
   };
 }
 
-/* ================== MINEFLAYER STATE ================== */
+/* ================== MC STATE ================== */
 let mc = null;
 let mcReady = false;
 let tabReady = false;
@@ -450,21 +435,24 @@ let connecting = false;
 let loginSent = false;
 let registerSent = false;
 
-/* moderation state */
+// moderation state
 let lastScan = null;
 let autoScanRunning = false;
 let autoScanLastRunTs = 0;
 let autoScanLastResult = "not_started";
 let autoScanLastError = "";
 
-/* helper state */
+// helper state
 let helperChatLogs = [];
 let helperScanAlerts = 0;
 let helperBridgeNumber = HELPER_BRIDGE_NUMBER_DEFAULT;
 let helperBridgeJoined = false;
+let helperJoinInProgress = false;
+let helperJoinTimer = null;
+let helperJoinAttempts = 0;
 let helperRecentAlerts = new Map();
 
-/* viewer state */
+// viewer state
 let viewerStarted = false;
 let viewerBotRef = null;
 
@@ -507,7 +495,7 @@ function tabComplete(bot, text) {
   });
 }
 
-/* ================== SAFE MODE CHUNKS ================== */
+/* ================== SAFE CHUNK PARSE OFF ================== */
 function disableChunkParsing(bot) {
   const c = bot?._client;
   if (!c) return;
@@ -544,7 +532,7 @@ function getHelperChatContext(limit = 12) {
   return helperChatLogs.slice(-limit).join("\n");
 }
 
-/* ================== VIEWER + SCREENSHOT ================== */
+/* ================== REAL VIEWER + SCREENSHOT ================== */
 async function startViewerIfNeeded() {
   if (!isHelperMode()) return;
   if (!mc) return;
@@ -605,7 +593,7 @@ async function takeRealViewerScreenshot(outputPath = `helper-real-${Date.now()}.
   }
 }
 
-/* ================== HELPER FASTBRIDGE GUI ================== */
+/* ================== HELPER FASTBRIDGE ================== */
 function helperExtractItemText(item) {
   if (!item) return "";
   const parts = [];
@@ -639,14 +627,18 @@ function helperFindCompassInHotbar() {
 
   for (let slot = 36; slot <= 44; slot++) {
     const item = mc.inventory.slots[slot];
+    if (!item) continue;
+
     const txt = helperExtractItemText(item);
-    if (!txt) continue;
+    const name = String(item.name || "").toLowerCase();
 
     if (
+      name.includes("compass") ||
       txt.includes("compass") ||
       txt.includes("компас") ||
       txt.includes("navigator") ||
-      txt.includes("menu")
+      txt.includes("menu") ||
+      txt.includes("сервер")
     ) {
       return slot;
     }
@@ -661,116 +653,189 @@ async function helperUseCompass() {
 
   const quickBarIndex = hotbarSlot - 36;
   mc.setQuickBarSlot(quickBarIndex);
-  await sleep(300);
-  mc.activateItem();
-  console.log("[HELPER] compass used");
+  await sleep(400);
+
+  try { mc.activateItem(false); } catch {}
+  await sleep(400);
+  try { mc.activateItem(); } catch {}
+
+  console.log("[HELPER] compass used from slot", hotbarSlot);
 }
 
 async function helperClickRedWoolFlow(window) {
-  const redWoolSlot1 = helperFindSlotByMatchers(window, [
+  const slot = helperFindSlotByMatchers(window, [
     "red_wool",
     "red wool",
     "красная шерсть",
     "шерсть",
     "bridging",
-    "бридж"
+    "bridge",
+    "бридж",
+    "тренировки"
   ]);
 
-  if (redWoolSlot1 >= 0) {
-    await mc.clickWindow(redWoolSlot1, 0, 0);
-    console.log("[HELPER] clicked first red wool / bridging");
-    return "FIRST_RED_WOOL";
+  if (slot >= 0) {
+    await sleep(250);
+    await mc.clickWindow(slot, 0, 0);
+    console.log("[HELPER] clicked first red wool / bridge menu, slot:", slot);
+    return true;
   }
 
-  return null;
+  return false;
 }
 
 async function helperClickFastBridgeWindow(window) {
   const slot = helperFindSlotByMatchers(window, [
-    "fastbridge",
-    "fast bridge",
     `fastbridge-${helperBridgeNumber}`,
     `fast bridge ${helperBridgeNumber}`,
+    `fastbridge ${helperBridgeNumber}`,
+    `bridge ${helperBridgeNumber}`,
+    "fastbridge",
+    "fast bridge",
     "red_wool",
     "red wool",
     "красная шерсть",
-    "тренировки",
-    "bridging"
+    "тренировки"
   ]);
 
   if (slot >= 0) {
+    await sleep(250);
     await mc.clickWindow(slot, 0, 0);
-    console.log("[HELPER] clicked second red wool / fastbridge");
-    return "FASTBRIDGE_CLICKED";
+    console.log("[HELPER] clicked fastbridge slot:", slot);
+    return true;
   }
 
-  return null;
+  return false;
+}
+
+function stopHelperJoinLoop() {
+  helperJoinInProgress = false;
+  if (helperJoinTimer) {
+    clearTimeout(helperJoinTimer);
+    helperJoinTimer = null;
+  }
+}
+
+function scheduleHelperJoinRetry(delay = 2500) {
+  if (!isHelperMode()) return;
+  if (helperBridgeJoined) return;
+  if (helperJoinTimer) clearTimeout(helperJoinTimer);
+
+  helperJoinTimer = setTimeout(() => {
+    helperJoinTimer = null;
+    helperTryJoinBridge().catch((e) => {
+      console.log("[HELPER] retry join error:", e?.message || e);
+    });
+  }, delay);
 }
 
 async function helperTryJoinBridge() {
   if (!isHelperMode() || !mcReady || !mc) return;
   if (helperBridgeJoined) return;
+  if (helperJoinInProgress) return;
 
-  console.log("[HELPER] trying join bridge flow...");
+  helperJoinInProgress = true;
+  helperJoinAttempts += 1;
+  console.log(`[HELPER] join attempt #${helperJoinAttempts}`);
 
-  let stage = 0;
   const startedAt = Date.now();
-  const maxMs = 20000;
+  const maxMs = 15000;
+  let stage = 0;
+  let clickedAnything = false;
+
+  const cleanup = () => {
+    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
+    helperJoinInProgress = false;
+  };
+
+  const success = () => {
+    helperBridgeJoined = true;
+    helperJoinAttempts = 0;
+    cleanup();
+    stopHelperJoinLoop();
+    console.log("[HELPER] successfully joined fastbridge");
+  };
+
+  const fail = () => {
+    cleanup();
+    if (!helperBridgeJoined) {
+      console.log("[HELPER] failed to join, scheduling retry...");
+      scheduleHelperJoinRetry(3000);
+    }
+  };
 
   const onWindowOpen = async (window) => {
     try {
       if (!isHelperMode()) return;
 
-      console.log("[HELPER] windowOpen:", window?.title || "no-title");
+      const title = stripColors(window?.title || "");
+      console.log("[HELPER] windowOpen:", title || "no-title");
 
       if (stage === 0) {
-        const r = await helperClickRedWoolFlow(window);
-        if (r) {
+        const ok = await helperClickRedWoolFlow(window);
+        if (ok) {
+          clickedAnything = true;
           stage = 1;
           return;
         }
       }
 
       if (stage === 1) {
-        const r = await helperClickFastBridgeWindow(window);
-        if (r) {
+        const ok = await helperClickFastBridgeWindow(window);
+        if (ok) {
+          clickedAnything = true;
           stage = 2;
-          helperBridgeJoined = true;
-          try { mc.closeWindow(window); } catch {}
-          try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
-          console.log("[HELPER] bridge joined");
+          setTimeout(() => success(), 1500);
           return;
         }
       }
 
       if (Date.now() - startedAt > maxMs) {
-        try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
+        fail();
       }
     } catch (e) {
-      console.log("[HELPER] bridge flow error:", e?.message || e);
-      try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
+      console.log("[HELPER] window flow error:", e?.message || e);
+      fail();
     }
   };
 
   mc.on("windowOpen", onWindowOpen);
 
   try {
-    await helperUseCompass();
-  } catch (e) {
-    console.log("[HELPER] compass error:", e?.message || e);
-  }
+    await sleep(1200);
 
-  // запасной вариант
-  setTimeout(() => {
-    if (!helperBridgeJoined) {
-      try { mc.chat(`/bridge ${helperBridgeNumber}`); } catch {}
-      try { mc.chat(`/join fastbridge-${helperBridgeNumber}`); } catch {}
+    let compassSlot = helperFindCompassInHotbar();
+    if (compassSlot === -1) {
+      await sleep(1500);
+      compassSlot = helperFindCompassInHotbar();
     }
-  }, 5000);
 
-  setTimeout(() => {
-    try { mc.removeListener("windowOpen", onWindowOpen); } catch {}
-  }, maxMs);
+    if (compassSlot === -1) {
+      console.log("[HELPER] compass still not found");
+      fail();
+      return;
+    }
+
+    await helperUseCompass();
+    clickedAnything = true;
+
+    setTimeout(() => {
+      if (!helperBridgeJoined) {
+        try { mc.chat(`/bridge ${helperBridgeNumber}`); } catch {}
+        try { mc.chat(`/join fastbridge-${helperBridgeNumber}`); } catch {}
+      }
+    }, 5000);
+
+    setTimeout(() => {
+      if (!helperBridgeJoined) {
+        if (!clickedAnything) console.log("[HELPER] nothing clicked");
+        fail();
+      }
+    }, maxMs);
+  } catch (e) {
+    console.log("[HELPER] helperTryJoinBridge error:", e?.message || e);
+    fail();
+  }
 }
 
 /* ================== HELPER CHAT PARSE ================== */
@@ -778,15 +843,12 @@ function parseHelperChatMessage(rawLine = "") {
   const line = stripColors(rawLine).trim();
   if (!line) return null;
 
-  // <Nick> text
   let match = line.match(/^<([A-Za-z0-9_]{3,16})>\s+(.+)$/);
   if (match) return { nick: match[1], message: match[2], raw: line };
 
-  // [RANK] Nick: text
   match = line.match(/^\[[^\]]+\]\s*([A-Za-z0-9_]{3,16})\s*:\s*(.+)$/);
   if (match) return { nick: match[1], message: match[2], raw: line };
 
-  // Nick: text
   match = line.match(/^([A-Za-z0-9_]{3,16})\s*:\s*(.+)$/);
   if (match) return { nick: match[1], message: match[2], raw: line };
 
@@ -827,20 +889,16 @@ async function sendHelperAlert(nick, violation, messageText) {
     try { fs.unlinkSync(screenshotPath); } catch {}
   } catch (e) {
     console.log("[HELPER] screenshot error:", e?.message || e);
-
     const context = getHelperChatContext(12);
     if (context) {
-      await sendChunksChat(
-        CHAT_ID,
-        `⚠️ Скрин не удалось сделать.\n\nКонтекст чата:\n${context}`
-      );
+      await sendChunksChat(CHAT_ID, `⚠️ Скрин не удалось сделать.\n\nКонтекст чата:\n${context}`);
     }
   }
 
   helperScanAlerts += 1;
 }
 
-/* ================== CONNECT MC ================== */
+/* ================== RESET / RECONNECT ================== */
 function resetMcStateForReconnect() {
   mcReady = false;
   tabReady = false;
@@ -848,7 +906,14 @@ function resetMcStateForReconnect() {
   mcLastError = "";
   loginSent = false;
   registerSent = false;
+
   helperBridgeJoined = false;
+  helperJoinInProgress = false;
+  helperJoinAttempts = 0;
+  if (helperJoinTimer) {
+    clearTimeout(helperJoinTimer);
+    helperJoinTimer = null;
+  }
 
   if (isHelperMode()) {
     viewerStarted = false;
@@ -865,6 +930,7 @@ function scheduleReconnect(reason) {
   }, 5000);
 }
 
+/* ================== CONNECT MC ================== */
 async function connectMC() {
   if (connecting) return;
   connecting = true;
@@ -922,7 +988,6 @@ async function connectMC() {
     mcLastError = "";
     console.log("[MC] login");
 
-    // форс-логин
     if (cfg.password) {
       setTimeout(() => {
         if (mc && mcOnline && !mcReady) {
@@ -947,7 +1012,6 @@ async function connectMC() {
       }, 6000);
     }
 
-    // fallback readiness via tab
     setTimeout(async () => {
       if (!mc || mcReady || tabReady) return;
 
@@ -960,14 +1024,15 @@ async function connectMC() {
 
           if (isHelperMode()) {
             await startViewerIfNeeded();
-            setTimeout(() => helperTryJoinBridge().catch(() => {}), 2000);
+            setTimeout(() => helperTryJoinBridge().catch(() => {}), 2500);
+            scheduleHelperJoinRetry(7000);
           }
         }
       } catch {}
     }, 3500);
   });
 
-  mc.on("spawn", () => {
+  mc.on("spawn", async () => {
     console.log("[MC] spawn");
     loginSent = false;
     registerSent = false;
@@ -980,7 +1045,8 @@ async function connectMC() {
 
         if (isHelperMode()) {
           await startViewerIfNeeded();
-          setTimeout(() => helperTryJoinBridge().catch(() => {}), 2000);
+          setTimeout(() => helperTryJoinBridge().catch(() => {}), 2500);
+          scheduleHelperJoinRetry(7000);
         }
       } else {
         mcReady = false;
@@ -992,9 +1058,10 @@ async function connectMC() {
   mc.on("messagestr", async (msg) => {
     const raw = String(msg);
     const m = raw.toLowerCase();
+    const plain = stripColors(raw);
 
-    console.log("[CHAT]", stripColors(raw));
-    helperPushChatLine(stripColors(raw));
+    console.log("[CHAT]", plain);
+    helperPushChatLine(plain);
 
     if (
       cfg.password &&
@@ -1039,6 +1106,25 @@ async function connectMC() {
     }
 
     if (isHelperMode()) {
+      const low = plain.toLowerCase();
+
+      if (
+        low.includes("лобби") ||
+        low.includes("hub") ||
+        low.includes("вы вернулись") ||
+        low.includes("добро пожаловать")
+      ) {
+        if (!helperBridgeJoined) scheduleHelperJoinRetry(2000);
+      }
+
+      if (
+        low.includes(`fastbridge-${helperBridgeNumber}`) ||
+        low.includes("присоединился к серверу") ||
+        low.includes("подключился")
+      ) {
+        helperBridgeJoined = true;
+      }
+
       const parsed = parseHelperChatMessage(raw);
       if (!parsed) return;
 
@@ -1048,7 +1134,7 @@ async function connectMC() {
       try {
         await sendHelperAlert(parsed.nick, violation, parsed.message);
       } catch (e) {
-        console.log("[HELPER] alert error:", e?.message || e);
+        console.log("[HELPER] alert send error:", e?.message || e);
       }
     }
   });
@@ -1077,7 +1163,7 @@ async function connectMC() {
   }, 1200);
 }
 
-/* ================== MODERATION SCAN HELPERS ================== */
+/* ================== MODERATION SCAN ================== */
 function clean(s) {
   return String(s).replace(/[^A-Za-z0-9_]/g, "");
 }
@@ -1228,15 +1314,12 @@ async function switchMode(nextMode) {
   if (currentMode === mode) return false;
 
   currentMode = mode;
-
-  // helper-specific state reset
   helperBridgeJoined = false;
   helperChatLogs = [];
   helperRecentAlerts.clear();
   viewerStarted = false;
   viewerBotRef = null;
 
-  // moderation state can stay cached, but readiness must be rebuilt by reconnect
   await connectMC();
   return true;
 }
@@ -1245,14 +1328,8 @@ async function switchMode(nextMode) {
 function menuKeyboard() {
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback(
-        currentMode === "helper" ? "✅ Helper mode" : "Helper mode",
-        "mode_helper"
-      ),
-      Markup.button.callback(
-        currentMode === "moderation" ? "✅ Moder mode" : "Moder mode",
-        "mode_moderation"
-      )
+      Markup.button.callback(currentMode === "helper" ? "✅ Helper mode" : "Helper mode", "mode_helper"),
+      Markup.button.callback(currentMode === "moderation" ? "✅ Moder mode" : "Moder mode", "mode_moderation")
     ],
     [Markup.button.callback("🔎 Скан всех (rules)", "scan_all")],
     [Markup.button.callback("🤖 AI по последнему скану", "ai_last")],
@@ -1268,7 +1345,7 @@ tg.start(async (c) => {
   await c.reply(
     "Готов.\n\n" +
     "Moder mode — скан ников.\n" +
-    "Helper mode — слежение за чатом + скрины.\n\n" +
+    "Helper mode — чат + скрин.\n\n" +
     "Команды:\n" +
     "/status\n" +
     "/tab <префикс>\n" +
@@ -1285,9 +1362,7 @@ tg.command("status", async (c) => {
 });
 
 tg.command("tab", async (c) => {
-  if (!isModerationMode()) {
-    return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
-  }
+  if (!isModerationMode()) return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
   if (!mcReady) return c.reply("MC не готов", menuKeyboard());
 
   const a = c.message.text.split(" ").slice(1).join(" ").trim();
@@ -1302,9 +1377,7 @@ tg.command("tab", async (c) => {
 });
 
 tg.command("tabcheck", async (c) => {
-  if (!isModerationMode()) {
-    return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
-  }
+  if (!isModerationMode()) return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
   if (!mcReady) return c.reply("MC не готов", menuKeyboard());
 
   const a = c.message.text.split(" ").slice(1).join(" ").trim();
@@ -1316,9 +1389,7 @@ tg.command("tabcheck", async (c) => {
 });
 
 tg.command("scanall", async (c) => {
-  if (!isModerationMode()) {
-    return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
-  }
+  if (!isModerationMode()) return c.reply("Эта команда работает только в Moder mode.", menuKeyboard());
   if (!mcReady) return c.reply("MC не готов", menuKeyboard());
 
   await c.reply("Сканирую...", menuKeyboard());
@@ -1341,9 +1412,7 @@ tg.command("reload_helper_rules", async (c) => {
 });
 
 tg.command("bridge", async (c) => {
-  if (!isHelperMode()) {
-    return c.reply("Команда /bridge работает только в Helper mode.", menuKeyboard());
-  }
+  if (!isHelperMode()) return c.reply("Команда /bridge работает только в Helper mode.", menuKeyboard());
 
   const raw = String(c.message.text || "").split(" ").slice(1).join(" ").trim();
   const next = Number(raw);
@@ -1365,9 +1434,7 @@ tg.action("mode_helper", async (ctx) => {
   try {
     const changed = await switchMode("helper");
     await ctx.reply(
-      changed
-        ? "✅ Переключено в Helper mode.\nБот переподключается..."
-        : "Helper mode уже активен.",
+      changed ? "✅ Переключено в Helper mode.\nБот переподключается..." : "Helper mode уже активен.",
       menuKeyboard()
     );
   } catch (e) {
@@ -1381,9 +1448,7 @@ tg.action("mode_moderation", async (ctx) => {
   try {
     const changed = await switchMode("moderation");
     await ctx.reply(
-      changed
-        ? "✅ Переключено в Moder mode.\nБот переподключается..."
-        : "Moder mode уже активен.",
+      changed ? "✅ Переключено в Moder mode.\nБот переподключается..." : "Moder mode уже активен.",
       menuKeyboard()
     );
   } catch (e) {
@@ -1398,7 +1463,6 @@ tg.action("status", async (ctx) => {
 
 tg.action("reload_rules", async (ctx) => {
   try { await ctx.answerCbQuery("Reload..."); } catch {}
-
   try {
     reloadRules();
     reloadHelperRules();
@@ -1411,9 +1475,7 @@ tg.action("reload_rules", async (ctx) => {
 tg.action("scan_all", async (ctx) => {
   try { await ctx.answerCbQuery("Scan..."); } catch {}
 
-  if (!isModerationMode()) {
-    return ctx.reply("Эта кнопка работает только в Moder mode.", menuKeyboard());
-  }
+  if (!isModerationMode()) return ctx.reply("Эта кнопка работает только в Moder mode.", menuKeyboard());
   if (!mcReady) return ctx.reply("MC не готов", menuKeyboard());
 
   await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
