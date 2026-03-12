@@ -1,17 +1,22 @@
 {
   "name": "icef4coffee-tabscan-bot",
+  "version": "2.0.0",
+  "description": "Telegram + Mineflayer bot with moderation mode and helper mode for AgeraPvP",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "mineflayer": "^4.20.1",
-    "telegraf": "^4.16.3"
+    "playwright": "^1.54.2",
     "prismarine-viewer": "^1.33.0",
-"playwright": "^1.54.2"
+    "telegraf": "^4.16.3"
   }
 }
-
 
 
