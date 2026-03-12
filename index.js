@@ -5,9 +5,9 @@ import { resolveSrv } from "dns/promises";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 /* ================== ENV ================== */
-
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
+const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
 
 const MC_HOST = (process.env.MC_HOST || "").trim();
 const MC_PORT = Number(process.env.MC_PORT || 25565);
@@ -19,22 +19,46 @@ const MC_PASSWORD = process.env.MC_PASSWORD;
 const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
+const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim();
 
+const READY_AFTER_MS = Number(process.env.READY_AFTER_MS || 1500);
+
+// Gemini
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
 const AI_ENABLED = (process.env.AI_ENABLED || "1") === "1";
+const AI_BUDGET_PER_CLICK = Number(process.env.AI_BUDGET_PER_CLICK || 30);
+const AI_DELAY_MS = Number(process.env.AI_DELAY_MS || 350);
+const AI_MIN_CONF_FOR_BAN = Number(process.env.AI_MIN_CONF_FOR_BAN || 0.75);
+const AI_MIN_CONF_FOR_OK = Number(process.env.AI_MIN_CONF_FOR_OK || 0.75);
 
 if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
-  throw new Error("Нужны BOT_TOKEN, MC_HOST и MC_USER");
+  throw new Error("Нужны BOT_TOKEN, MC_HOST, MC_USER");
 }
 
-/* ================== TELEGRAM ================== */
-
+/* ================== TELEGRAM BOT ================== */
 const tg = new Telegraf(BOT_TOKEN);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-tg.catch((err) => {
-  console.log("⚠️ Telegram error:", err?.message || err);
-});
+tg.catch((err) => console.log("⚠️ TG handler error:", err?.message || err));
 
+async function safeSend(chatId, text, extra) {
+  try {
+    await tg.telegram.sendMessage(chatId, text, extra);
+    return true;
+  } catch (e) {
+    console.log("[TG SEND ERROR]", e?.message || e);
+    return false;
+  }
+}
+
+function escapeHtml(s = "") {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/* ================== 409 FIX ================== */
 async function launchTelegramSafely() {
   while (true) {
     try {
@@ -43,22 +67,27 @@ async function launchTelegramSafely() {
       console.log("✅ Telegram started");
       return;
     } catch (e) {
-      console.log("❌ Telegram start error:", e?.message || e);
-      await new Promise((r) => setTimeout(r, 5000));
+      const msg = String(e?.message || e);
+      if (msg.includes("409") || msg.includes("Conflict")) {
+        console.log("⚠️ 409 Conflict — другой инстанс getUpdates. Жду 15с...");
+        await sleep(15000);
+        continue;
+      }
+      console.log("❌ Telegram launch error:", msg);
+      await sleep(5000);
     }
   }
 }
 
 /* ================== RULES ================== */
-
 let RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
 
 function reloadRules() {
   RULES = JSON.parse(fs.readFileSync("rules.json", "utf8"));
+  rebuildNormalization();
 }
 
 /* ================== NORMALIZE ================== */
-
 const cyr = {
   "а": "a",
   "е": "e",
@@ -69,331 +98,778 @@ const cyr = {
   "у": "y",
   "к": "k",
   "м": "m",
-  "т": "t"
+  "т": "t",
 };
+
+let invisRe, sepRe, leetMap, collapseRepeats, maxRepeat;
 
 function stripColors(s = "") {
   return s.replace(/§./g, "");
 }
 
+function rebuildNormalization() {
+  invisRe = new RegExp(
+    RULES?.normalization?.strip_invisibles_regex ||
+      "[\\u200B-\\u200F\\u202A-\\u202E\\u2060\\uFEFF]",
+    "g"
+  );
+  sepRe = new RegExp(
+    RULES?.normalization?.separators_regex ||
+      "[\\s\\-_.:,;|/\\\\~`'\"^*+=()\\[\\]{}<>]+",
+    "g"
+  );
+  leetMap =
+    RULES?.normalization?.leet_map || {
+      "0": "o",
+      "1": "i",
+      "3": "e",
+      "4": "a",
+      "5": "s",
+      "7": "t",
+      "@": "a",
+      "$": "s",
+    };
+  collapseRepeats = RULES?.normalization?.collapse_repeats ?? true;
+  maxRepeat = RULES?.normalization?.max_repeat ?? 2;
+}
+rebuildNormalization();
+
 function norm(s = "") {
   s = stripColors(s);
-  s = s.toLowerCase();
-
-  s = [...s].map(ch => cyr[ch] || ch).join("");
-
-  return s.replace(/[^a-z0-9_]/g, "");
+  if (RULES?.normalization?.lowercase ?? true) s = s.toLowerCase();
+  s = s.replace(invisRe, "");
+  s = [...s].map((ch) => cyr[ch] || leetMap[ch] || ch).join("");
+  s = s.replace(sepRe, "");
+  if (collapseRepeats) {
+    const re = new RegExp(`(.)\\1{${maxRepeat},}`, "g");
+    s = s.replace(re, "$1".repeat(maxRepeat));
+  }
+  return s;
 }
 
-/* ================== CHECK NICK ================== */
-
+/* ================== CHECKER ================== */
 function checkNick(name) {
   const n = norm(name);
 
-  const banReasons = [];
+  const wl = new Set((RULES.whitelist_exact || []).map(norm));
+  if (wl.has(n)) return ["OK", ["whitelist"]];
 
+  const banReasons = [];
   for (const rule of RULES.rules || []) {
     if ((rule.action || "").toUpperCase() !== "BAN") continue;
-
-    for (const word of rule.words || []) {
-      const w = norm(word);
-      if (n.includes(w)) banReasons.push(word);
+    for (const w0 of rule.words || []) {
+      const w = norm(String(w0));
+      if (w && n.includes(w)) banReasons.push(`${rule.reason || rule.id}:${w0}`);
     }
   }
-
   if (banReasons.length) return ["BAN", banReasons];
+
+  const review = [];
+  for (const w0 of RULES.review || []) {
+    const w = norm(String(w0));
+    if (w && n.includes(w)) review.push(`review:${w0}`);
+  }
+  if (review.length) return ["REVIEW", review];
 
   return ["OK", []];
 }
 
 /* ================== REPORT ================== */
+function splitText(t, max = 3500) {
+  const parts = [];
+  let buf = "";
+  for (const line of t.split("\n")) {
+    if ((buf + line + "\n").length > max) {
+      parts.push(buf);
+      buf = "";
+    }
+    buf += line + "\n";
+  }
+  if (buf) parts.push(buf);
+  return parts;
+}
+
+async function sendChunksReply(ctx, text) {
+  for (const p of splitText(text)) {
+    if (p.trim()) await ctx.reply(p);
+  }
+}
+
+async function sendChunksChat(bot, chatId, text) {
+  for (const p of splitText(text)) {
+    if (!p.trim()) continue;
+    const ok = await safeSend(chatId, p);
+    if (!ok) throw new Error("TG_SEND_FAILED");
+  }
+}
+
+async function sendChunksChatHtml(bot, chatId, html) {
+  for (const p of splitText(html)) {
+    if (!p.trim()) continue;
+    const ok = await safeSend(chatId, p, { parse_mode: "HTML" });
+    if (ok) continue;
+
+    const fallback = p.replace(/<[^>]+>/g, "");
+    const plainOk = await safeSend(chatId, fallback);
+    if (!plainOk) throw new Error("TG_SEND_FAILED");
+  }
+}
 
 function report(title, names) {
-
   const ban = [];
+  const rev = [];
 
   for (const nick of names) {
-    const [status, reasons] = checkNick(nick);
-
-    if (status === "BAN") {
-      ban.push({ nick, reasons });
-    }
+    const [s, r] = checkNick(nick);
+    if (s === "BAN") ban.push({ nick, r });
+    else if (s === "REVIEW") rev.push({ nick, r });
   }
 
-  let out = `${title}\nНайдено игроков: ${names.length}\n\n`;
+  let out = `${title}\nНайдено: ${names.length}\n\n`;
 
   if (ban.length) {
     out += `❌ BAN (${ban.length}):\n`;
-
     ban.forEach((x, i) => {
-      out += `${i + 1}) ${x.nick} → ${x.reasons.join(", ")}\n`;
+      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
     });
-
-  } else {
-    out += "✅ Нарушений не найдено";
+    out += "\n";
   }
 
-  return out;
-}
+  if (rev.length) {
+    out += `⚠️ REVIEW (${rev.length}):\n`;
+    rev.forEach((x, i) => {
+      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
+    });
+    out += "\n";
+  }
 
-/* ================== MINEFLAYER ================== */
-
-let mc;
-let mcReady = false;
-
-async function resolveMcEndpoint(host, port) {
-
-  try {
-
-    const srv = await resolveSrv(`_minecraft._tcp.${host}`);
-
-    if (srv.length) {
-      return {
-        host: srv[0].name,
-        port: srv[0].port
-      };
-    }
-
-  } catch {}
+  if (!ban.length && !rev.length) {
+    out += "✅ Некорректных ников не найдено.\n";
+  }
 
   return {
-    host,
-    port
+    out,
+    ban: ban.length,
+    rev: rev.length,
+    reviewNicks: rev.map((x) => x.nick),
   };
 }
 
+/* ================== SAFE MODE: DISABLE CHUNK PARSING ================== */
+function disableChunkParsing(bot) {
+  const c = bot?._client;
+  if (!c) return;
+
+  const packetNames = [
+    "map_chunk",
+    "map_chunk_bulk",
+    "unload_chunk",
+    "multi_block_change",
+    "block_change",
+    "update_block_entity",
+    "block_action",
+  ];
+
+  for (const name of packetNames) {
+    try {
+      c.removeAllListeners(name);
+      c.on(name, () => {});
+    } catch {}
+  }
+
+  console.log("[MC] chunk parsing disabled (safe mode)");
+}
+
+/* ================== SRV RESOLVE ================== */
+async function resolveMcEndpoint(host, port) {
+  const h = String(host || "").trim();
+  const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(h);
+
+  if (!isIp) {
+    try {
+      const srv = await resolveSrv(`_minecraft._tcp.${h}`);
+      if (srv && srv.length) {
+        srv.sort((a, b) => a.priority - b.priority || b.weight - a.weight);
+        const best = srv[0];
+        return { host: best.name, port: best.port, via: "SRV" };
+      }
+    } catch {}
+  }
+
+  return { host: h, port: Number(port || 25565), via: "DIRECT" };
+}
+
+/* ================== TAB COMPLETE ================== */
+function tabComplete(bot, text) {
+  return new Promise((res, rej) => {
+    if (!bot?._client) return rej(new Error("CLIENT_NOT_READY"));
+    const c = bot._client;
+
+    const to = setTimeout(() => {
+      cleanup();
+      rej(new Error("TAB_TIMEOUT"));
+    }, 2500);
+
+    const on = (p) => {
+      cleanup();
+      res(
+        p?.matches?.map((x) =>
+          typeof x === "string" ? x : x.text || x.match || ""
+        ) || []
+      );
+    };
+
+    function cleanup() {
+      clearTimeout(to);
+      try {
+        c.removeListener("tab_complete", on);
+      } catch {}
+      try {
+        c.removeListener("tab_complete_response", on);
+      } catch {}
+    }
+
+    c.once("tab_complete", on);
+    c.once("tab_complete_response", on);
+
+    try {
+      c.write("tab_complete", {
+        text,
+        assumeCommand: true,
+        lookedAtBlock: { x: 0, y: 0, z: 0 },
+      });
+    } catch (e) {
+      cleanup();
+      rej(e);
+    }
+  });
+}
+
+/* ================== MINEFLAYER ================== */
+let mc;
+let mcReady = false;
+let tabReady = false;
+let mcOnline = false;
+let mcLastError = "";
+let loginSent = false;
+let registerSent = false;
+let reconnectTimer = null;
+let connecting = false;
+let autoScanPrimed = false;
+
+function scheduleReconnect(reason) {
+  if (reconnectTimer) return;
+  console.log("[MC] reconnect scheduled:", reason);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectMC().catch(() => {});
+  }, 5000);
+}
+
 async function connectMC() {
+  if (connecting) return;
+  connecting = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (mc) {
+    try {
+      mc.quit?.("reconnect");
+    } catch {}
+    try {
+      mc.end?.();
+    } catch {}
+    try {
+      mc._client?.end?.();
+    } catch {}
+    mc = null;
+  }
+
+  mcReady = false;
+  tabReady = false;
+  mcOnline = false;
+  mcLastError = "";
+  loginSent = false;
+  registerSent = false;
+  autoScanPrimed = false;
 
   const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
 
-  mc = mineflayer.createBot({
-    host: ep.host,
-    port: ep.port,
-    username: MC_USER,
-    version: MC_VERSION
+  console.log("[MC DEBUG]", {
+    inputHost: MC_HOST,
+    inputPort: MC_PORT,
+    resolvedHost: ep.host,
+    resolvedPort: ep.port,
+    via: ep.via,
+    version: MC_VERSION,
+    user: MC_USER,
   });
 
+  try {
+    mc = mineflayer.createBot({
+      host: ep.host,
+      port: ep.port,
+      username: MC_USER,
+      version: MC_VERSION,
+      viewDistance: 1,
+    });
+  } catch (e) {
+    mcLastError = "createBot failed: " + String(e?.message || e);
+    console.log("[MC]", mcLastError);
+    scheduleReconnect("createBot");
+    connecting = false;
+    return;
+  }
+
   mc.on("login", () => {
-    console.log("✅ MC login");
+    disableChunkParsing(mc);
+
+    mcOnline = true;
+    mcReady = false;
+    mcLastError = "";
+    console.log("[MC] login");
+
+    setTimeout(async () => {
+      if (!mc || mcReady || tabReady) return;
+      try {
+        const r = await tabComplete(mc, "/msg a");
+        if (Array.isArray(r)) {
+          tabReady = true;
+          mcReady = true;
+          primeAutoScan();
+          console.log("[MC] READY via TAB_COMPLETE");
+        }
+      } catch (e) {
+        console.log("[MC] TAB readiness failed:", e?.message || e);
+      }
+    }, 2500);
   });
 
   mc.on("spawn", () => {
-    mcReady = true;
-    console.log("✅ MC ready");
+    console.log("[MC] spawn");
+    setTimeout(() => {
+      mcReady = true;
+      primeAutoScan();
+      console.log("[MC] READY via SPAWN");
+    }, READY_AFTER_MS);
   });
 
   mc.on("messagestr", (msg) => {
-
-    const m = msg.toLowerCase();
-
-    if (MC_PASSWORD && m.includes("login")) {
-      setTimeout(() => {
-        mc.chat(`/login ${MC_PASSWORD}`);
-      }, 1500);
+    const m = String(msg).toLowerCase();
+    if (MC_PASSWORD && !loginSent && m.includes("login")) {
+      loginSent = true;
+      setTimeout(() => mc?.chat?.(`/login ${MC_PASSWORD}`), 1500);
     }
-
-    if (MC_PASSWORD && m.includes("register")) {
-      setTimeout(() => {
-        mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
-      }, 1500);
+    if (MC_PASSWORD && !registerSent && m.includes("register")) {
+      registerSent = true;
+      setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
     }
-
   });
 
-  mc.on("end", () => {
-    console.log("MC disconnected");
+  const onDisconnect = (reason) => {
     mcReady = false;
-    setTimeout(connectMC, 5000);
+    tabReady = false;
+    mcOnline = false;
+    mcLastError = reason;
+    loginSent = false;
+    registerSent = false;
+    console.log("[MC] disconnected:", reason);
+    scheduleReconnect(reason);
+  };
+
+  mc.on("end", () => onDisconnect("end"));
+  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
+  mc.on("error", (e) => {
+    const msg = e && (e.stack || e.message) ? e.stack || e.message : String(e);
+    onDisconnect("error: " + msg);
   });
 
+  setTimeout(() => {
+    connecting = false;
+  }, 1200);
 }
 
-/* ================== TAB SCAN ================== */
+connectMC().catch((e) => console.log("[MC] connect error:", e?.message || e));
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+/* ================== SCAN HELPERS ================== */
+function clean(s) {
+  return String(s).replace(/[^A-Za-z0-9_]/g, "");
 }
 
-async function tabComplete(prefix) {
+async function byPrefix(prefix) {
+  const raw = await tabComplete(mc, `/msg ${prefix}`);
+  const pref = clean(prefix).toLowerCase();
 
-  return new Promise((resolve) => {
+  const result = raw
+    .map(clean)
+    .filter(
+      (n) =>
+        n.length >= 3 &&
+        n.length <= 16 &&
+        n.toLowerCase().startsWith(pref)
+    );
 
-    const client = mc._client;
-
-    const on = (packet) => {
-
-      const names = packet.matches || [];
-
-      resolve(names);
-
-    };
-
-    client.once("tab_complete", on);
-
-    client.write("tab_complete", {
-      text: `/msg ${prefix}`,
-      assumeCommand: true
-    });
-
-  });
-
+  console.log(`[TAB] prefix=${prefix} raw=${raw.length} filtered=${result.length}`);
+  return result;
 }
 
-async function collectPlayers() {
+function prefixes() {
+  if (AUTO_PREFIXES) {
+    return AUTO_PREFIXES.split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
 
-  const prefixes = "abcdefghijklmnopqrstuvwxyz0123456789_".split("");
+  const a = [];
+  for (let i = 97; i <= 122; i++) a.push(String.fromCharCode(i));
+  for (let i = 0; i <= 9; i++) a.push(String(i));
+  a.push("_");
+  return a;
+}
+
+async function collect(ps) {
+  if (!mcReady) throw new Error("MC_NOT_READY");
 
   const all = new Set();
+  let okPrefixes = 0;
+  let failedPrefixes = 0;
+  const errors = [];
 
-  for (const p of prefixes) {
+  for (const p of ps) {
+    if (!mcReady) throw new Error("MC_NOT_READY");
 
-    const res = await tabComplete(p);
-
-    res.forEach(n => all.add(n));
+    try {
+      const found = await byPrefix(p);
+      found.forEach((n) => all.add(n));
+      okPrefixes++;
+    } catch (e) {
+      failedPrefixes++;
+      const msg = String(e?.message || e);
+      errors.push(`${p}: ${msg}`);
+      console.log("[AUTO][PREFIX ERROR]", p, msg);
+    }
 
     await sleep(SCAN_DELAY_MS);
+  }
 
+  console.log(
+    `[AUTO][COLLECT] ok=${okPrefixes} fail=${failedPrefixes} totalNames=${all.size}`
+  );
+
+  if (okPrefixes === 0) {
+    throw new Error("ALL_PREFIXES_FAILED: " + errors.slice(0, 5).join(" | "));
   }
 
   return [...all];
-
 }
 
-/* ================== GEMINI ================== */
-
+/* ================== GEMINI AI ================== */
 let geminiModel = null;
-
 if (GEMINI_API_KEY) {
-
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-  geminiModel = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash"
-  });
-
+  geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 }
 
-/* ================== TELEGRAM MENU ================== */
+async function geminiReviewNick(nick) {
+  if (!AI_ENABLED || !geminiModel) {
+    return { decision: "REVIEW", confidence: 0, reason: "AI выключен" };
+  }
 
+  const normalized = norm(nick);
+
+  const prompt = `
+Верни СТРОГО JSON без текста вокруг:
+{"decision":"BAN|REVIEW|OK","confidence":0.0,"reason":"кратко"}
+
+BAN — явный мат/оскорбления/расизм/экстремизм/18+/наркотики/читы/маскировка под персонал/проект.
+REVIEW — сомнительно/намёк/двусмысленно.
+OK — чисто.
+
+Ник: ${nick}
+Нормализация: ${normalized}
+`;
+
+  try {
+    const result = await geminiModel.generateContent(prompt);
+    const text = result?.response?.text?.()?.trim?.() || "";
+    const m = text.match(/\{[\s\S]*\}/);
+
+    if (!m) {
+      return { decision: "REVIEW", confidence: 0, reason: "AI не вернул JSON" };
+    }
+
+    const data = JSON.parse(m[0]);
+    const decision = String(data.decision || "REVIEW").toUpperCase();
+    const confidence = Math.max(0, Math.min(1, Number(data.confidence || 0)));
+    const reason = String(data.reason || "—").slice(0, 120);
+
+    if (!["BAN", "REVIEW", "OK"].includes(decision)) {
+      return {
+        decision: "REVIEW",
+        confidence: 0,
+        reason: "AI decision некорректный",
+      };
+    }
+
+    return { decision, confidence, reason };
+  } catch {
+    return { decision: "REVIEW", confidence: 0, reason: "Ошибка Gemini" };
+  }
+}
+
+/* ================== LAST SCAN CACHE ================== */
+let lastScan = null;
+// { ts, names:[], reportText, reviewNicks:[] }
+
+/* ================== STATUS HELPERS ================== */
+let autoScanRunning = false;
+let autoScanLastRunTs = 0;
+let autoScanLastResult = "not_started";
+let autoScanLastError = "";
+let autoScanTimer = null;
+
+function formatMcStatus() {
+  if (mcOnline && mcReady) return "✅ на сервере (готов)";
+  if (mcOnline) return "🟡 подключён, но не готов";
+  return "❌ не в сети";
+}
+
+function formatAutoScanStatus() {
+  if (!AUTO_SCAN) return "❌ выключен";
+  if (autoScanRunning) return "🔄 идёт скан";
+  if (autoScanLastResult === "not_started") return "⏳ ожидает первого запуска";
+  if (autoScanLastResult === "waiting_mc") return "⏳ ожидает готовности MC";
+  if (autoScanLastResult === "missing_chat") return "❌ нет CHAT_ID";
+  if (autoScanLastResult === "ok_no_hits") return "✅ последний проход без совпадений";
+  if (autoScanLastResult === "ok_hits") return "⚠️ последний проход нашёл совпадения";
+  if (autoScanLastResult === "send_failed") return "❌ ошибка отправки в Telegram";
+  if (autoScanLastResult === "error") return "❌ ошибка автоскана";
+  return autoScanLastResult;
+}
+
+function formatStatusText() {
+  const ai = AI_ENABLED && geminiModel ? "✅ включён" : "❌ выключен";
+  const last = lastScan
+    ? `✅ есть (${Math.round((Date.now() - lastScan.ts) / 1000)}с назад)`
+    : "❌ нет";
+  const autoAge = autoScanLastRunTs
+    ? `${Math.round((Date.now() - autoScanLastRunTs) / 1000)}с назад`
+    : "ещё не запускался";
+
+  return [
+    `MC статус: ${formatMcStatus()}`,
+    `Ник: ${MC_USER}`,
+    `Версия: ${MC_VERSION}`,
+    `AI (Gemini): ${ai}`,
+    `Last scan: ${last}`,
+    `Auto scan: ${formatAutoScanStatus()}`,
+    `Auto scan last run: ${autoAge}`,
+    `MC ready: ${mcReady}`,
+    `MC online: ${mcOnline}`,
+    `Auto running: ${autoScanRunning}`,
+    `Auto result: ${autoScanLastResult}`,
+    mcLastError ? `MC error: ${mcLastError}` : "",
+    autoScanLastError ? `Auto scan error: ${autoScanLastError}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/* ================== BUTTONS MENU ================== */
 function menuKeyboard() {
-
   return Markup.inlineKeyboard([
-    [Markup.button.callback("🔎 Скан всех", "scan_all")],
-    [Markup.button.callback("📊 Статус", "status")],
-    [Markup.button.callback("🔁 Reload rules", "reload_rules")]
+    [Markup.button.callback("🔎 Скан всех (rules)", "scan_all")],
+    [Markup.button.callback("🤖 AI по последнему скану", "ai_last")],
+    [Markup.button.callback("🧪 AI один ник", "ai_one")],
+    [
+      Markup.button.callback("📊 Статус", "status"),
+      Markup.button.callback("🔃 Reload rules", "reload_rules"),
+    ],
   ]);
-
 }
 
 /* ================== COMMANDS ================== */
+tg.start((c) =>
+  c.reply(
+    "Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/status",
+    menuKeyboard()
+  )
+);
 
-tg.start((ctx) => {
+tg.command("status", (c) => {
+  c.reply(formatStatusText(), menuKeyboard());
+});
 
-  ctx.reply(
-    "Бот запущен.\n\n" +
-    "/scanall — полный скан\n" +
-    "/status — статус",
+tg.command("tab", async (c) => {
+  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+
+  const a = c.message.text.split(" ").slice(1).join(" ");
+  const n = [...new Set(await byPrefix(a))];
+
+  let t = `Tab ${a}\nНайдено: ${n.length}\n\n`;
+  n.forEach((x, i) => {
+    t += `${i + 1}) ${x}\n`;
+  });
+
+  await sendChunksReply(c, t);
+  await c.reply("Меню:", menuKeyboard());
+});
+
+tg.command("tabcheck", async (c) => {
+  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+
+  const a = c.message.text.split(" ").slice(1).join(" ");
+  const n = await byPrefix(a);
+
+  await sendChunksReply(c, report(`Tabcheck ${a}`, n).out);
+  await c.reply("Меню:", menuKeyboard());
+});
+
+tg.command("scanall", async (c) => {
+  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+
+  await c.reply("Сканирую...", menuKeyboard());
+  const n = await collect(prefixes());
+  const r = report("Full scan", n);
+
+  lastScan = {
+    ts: Date.now(),
+    names: n,
+    reportText: r.out,
+    reviewNicks: r.reviewNicks,
+  };
+
+  await sendChunksReply(c, r.out);
+  await c.reply(
+    "Готово. Можешь нажать 🤖 AI по последнему скану",
     menuKeyboard()
   );
-
 });
 
-tg.command("status", (ctx) => {
-
-  ctx.reply(
-    mcReady
-      ? "✅ Бот на сервере"
-      : "❌ Бот не подключён",
-    menuKeyboard()
-  );
-
-});
-
-tg.command("scanall", async (ctx) => {
-
-  if (!mcReady) {
-    return ctx.reply("MC не готов");
-  }
-
-  ctx.reply("🔎 Сканирую игроков...");
-
-  const players = await collectPlayers();
-
-  const result = report("Full scan", players);
-
-  ctx.reply(result);
-
-});
-
-/* ================== BUTTONS ================== */
-
-tg.action("scan_all", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  if (!mcReady) {
-    return ctx.reply("MC не готов");
-  }
-
-  ctx.reply("🔎 Сканирую игроков...");
-
-  const players = await collectPlayers();
-
-  const result = report("Full scan", players);
-
-  ctx.reply(result);
-
-});
-
+/* ================== BUTTON HANDLERS ================== */
 tg.action("status", async (ctx) => {
-
-  await ctx.answerCbQuery();
-
-  ctx.reply(
-    mcReady
-      ? "✅ Бот подключён к серверу"
-      : "❌ Бот не подключён",
-    menuKeyboard()
-  );
-
+  try {
+    await ctx.answerCbQuery();
+  } catch {}
+  await ctx.reply(formatStatusText(), menuKeyboard());
 });
 
 tg.action("reload_rules", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Reload...");
+  } catch {}
 
-  await ctx.answerCbQuery();
-
-  reloadRules();
-
-  ctx.reply("✅ rules.json перезагружен", menuKeyboard());
-
+  try {
+    reloadRules();
+    await ctx.reply("✅ rules.json перезагружен", menuKeyboard());
+  } catch (e) {
+    await ctx.reply(
+      "❌ rules.json reload error: " + String(e?.message || e),
+      menuKeyboard()
+    );
+  }
 });
 
-/* ================== AUTO SCAN ================== */
+tg.action("scan_all", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Scan...");
+  } catch {}
 
-if (AUTO_SCAN) {
+  if (!mcReady) return ctx.reply("MC не готов", menuKeyboard());
+  await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
 
-  setInterval(async () => {
+  const n = await collect(prefixes());
+  const r = report("Full scan (button)", n);
 
-    if (!mcReady) return;
+  lastScan = {
+    ts: Date.now(),
+    names: n,
+    reportText: r.out,
+    reviewNicks: r.reviewNicks,
+  };
 
-    const players = await collectPlayers();
+  await sendChunksReply(ctx, r.out);
+  await ctx.reply("Готово. Нажми 🤖 AI по последнему скану", menuKeyboard());
+});
 
-    const result = report("Auto scan", players);
+/* ====== AI LAST SCAN ====== */
+tg.action("ai_last", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("AI...");
+  } catch {}
 
-    if (CHAT_ID) {
-      tg.telegram.sendMessage(CHAT_ID, result);
+  if (!lastScan) {
+    return ctx.reply(
+      "❌ Нет последнего скана. Сначала сделай /scanall или кнопку 🔎",
+      menuKeyboard()
+    );
+  }
+
+  if (!AI_ENABLED || !geminiModel) {
+    return ctx.reply(
+      "❌ AI выключен (нет GEMINI_API_KEY или AI_ENABLED=0)",
+      menuKeyboard()
+    );
+  }
+
+  const candidates = [...(lastScan.reviewNicks || [])];
+  if (!candidates.length) {
+    return ctx.reply(
+      "✅ В последнем скане нет REVIEW. AI нечего проверять.",
+      menuKeyboard()
+    );
+  }
+
+  await ctx.reply(
+    `🤖 AI проверяю REVIEW из последнего скана... (${candidates.length})`,
+    menuKeyboard()
+  );
+
+  const ban = [];
+  const ok = [];
+  const review = [];
+
+  let budget = Math.max(0, AI_BUDGET_PER_CLICK);
+
+  for (const nick of candidates) {
+    if (budget <= 0) {
+      review.push(`${nick} (лимит AI исчерпан)`);
+      continue;
     }
+    budget--;
 
-  }, AUTO_SCAN_MINUTES * 60000);
+    const ai = await geminiReviewNick(nick);
+    await sleep(AI_DELAY_MS);
 
+    if (ai.decision === "BAN" && ai.confidence >= AI_MIN_CONF_FOR_BAN) {
+      ban.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+    } else if (ai.decision === "OK" && ai.confidence >= AI_MIN_CONF_FOR_OK) {
+      ok.push(`${nick} (AI OK, ${Math.round(ai.confidence * 100)}%)`);
+    } else {
+      review.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+    }
+  }
+
+  let out = `🤖 AI RESULT (последний скан)\n\n`;
+  out += `🚫 BAN: ${ban.length}\n`;
+  out += `✅ OK: ${ok.length}\n`;
+  out += `⚠️ REVIEW: ${review.length}\n\n`;
+
+  if (ban.length) out += `🚫 BAN LIST:\n${ban.join("\n")}\n\n`;
+  if (review.length) out += `⚠️ REVIEW LIST:\n${review.join("\n")}\n\n`;
+  if (ok.length) out += `✅ OK LIST:\n${ok.join("\n")}\n\n`;
+
+  await sendChunksReply(ctx, out);
+  await ctx.reply("Меню:", menuKeyboard());
+});
+
+/* ====== AI ONE NICK ====== */
+const awaitingNick = new Map(); // chatId -> userId
+
+tg.action("ai_one", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
 }
-
-/* ================== START ================== */
-
-(async () => {
-
-  await launchTelegramSafely();
-
-  await connectMC();
-
-})();
