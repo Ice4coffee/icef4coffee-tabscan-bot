@@ -39,7 +39,9 @@ if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
 const tg = new Telegraf(BOT_TOKEN);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-tg.catch((err) => console.log("⚠️ TG handler error:", err?.message || err));
+tg.catch((err) => {
+  console.log("TG handler error:", err?.message || err);
+});
 
 async function safeSend(chatId, text, extra) {
   try {
@@ -62,18 +64,18 @@ function escapeHtml(s = "") {
 async function launchTelegramSafely() {
   while (true) {
     try {
-      console.log("🤖 Telegram starting...");
+      console.log("Telegram starting...");
       await tg.launch({ dropPendingUpdates: true });
-      console.log("✅ Telegram started");
+      console.log("Telegram started");
       return;
     } catch (e) {
       const msg = String(e?.message || e);
       if (msg.includes("409") || msg.includes("Conflict")) {
-        console.log("⚠️ 409 Conflict — другой инстанс getUpdates. Жду 15с...");
+        console.log("409 Conflict — другой инстанс getUpdates. Жду 15с...");
         await sleep(15000);
         continue;
       }
-      console.log("❌ Telegram launch error:", msg);
+      console.log("Telegram launch error:", msg);
       await sleep(5000);
     }
   }
@@ -101,7 +103,11 @@ const cyr = {
   "т": "t",
 };
 
-let invisRe, sepRe, leetMap, collapseRepeats, maxRepeat;
+let invisRe;
+let sepRe;
+let leetMap;
+let collapseRepeats;
+let maxRepeat;
 
 function stripColors(s = "") {
   return s.replace(/§./g, "");
@@ -113,11 +119,13 @@ function rebuildNormalization() {
       "[\\u200B-\\u200F\\u202A-\\u202E\\u2060\\uFEFF]",
     "g"
   );
+
   sepRe = new RegExp(
     RULES?.normalization?.separators_regex ||
       "[\\s\\-_.:,;|/\\\\~`'\"^*+=()\\[\\]{}<>]+",
     "g"
   );
+
   leetMap =
     RULES?.normalization?.leet_map || {
       "0": "o",
@@ -129,6 +137,7 @@ function rebuildNormalization() {
       "@": "a",
       "$": "s",
     };
+
   collapseRepeats = RULES?.normalization?.collapse_repeats ?? true;
   maxRepeat = RULES?.normalization?.max_repeat ?? 2;
 }
@@ -140,10 +149,12 @@ function norm(s = "") {
   s = s.replace(invisRe, "");
   s = [...s].map((ch) => cyr[ch] || leetMap[ch] || ch).join("");
   s = s.replace(sepRe, "");
+
   if (collapseRepeats) {
     const re = new RegExp(`(.)\\1{${maxRepeat},}`, "g");
     s = s.replace(re, "$1".repeat(maxRepeat));
   }
+
   return s;
 }
 
@@ -159,7 +170,9 @@ function checkNick(name) {
     if ((rule.action || "").toUpperCase() !== "BAN") continue;
     for (const w0 of rule.words || []) {
       const w = norm(String(w0));
-      if (w && n.includes(w)) banReasons.push(`${rule.reason || rule.id}:${w0}`);
+      if (w && n.includes(w)) {
+        banReasons.push(`${rule.reason || rule.id}:${w0}`);
+      }
     }
   }
   if (banReasons.length) return ["BAN", banReasons];
@@ -167,7 +180,9 @@ function checkNick(name) {
   const review = [];
   for (const w0 of RULES.review || []) {
     const w = norm(String(w0));
-    if (w && n.includes(w)) review.push(`review:${w0}`);
+    if (w && n.includes(w)) {
+      review.push(`review:${w0}`);
+    }
   }
   if (review.length) return ["REVIEW", review];
 
@@ -178,6 +193,7 @@ function checkNick(name) {
 function splitText(t, max = 3500) {
   const parts = [];
   let buf = "";
+
   for (const line of t.split("\n")) {
     if ((buf + line + "\n").length > max) {
       parts.push(buf);
@@ -185,17 +201,20 @@ function splitText(t, max = 3500) {
     }
     buf += line + "\n";
   }
+
   if (buf) parts.push(buf);
   return parts;
 }
 
 async function sendChunksReply(ctx, text) {
   for (const p of splitText(text)) {
-    if (p.trim()) await ctx.reply(p);
+    if (p.trim()) {
+      await ctx.reply(p);
+    }
   }
 }
 
-async function sendChunksChat(bot, chatId, text) {
+async function sendChunksChat(chatId, text) {
   for (const p of splitText(text)) {
     if (!p.trim()) continue;
     const ok = await safeSend(chatId, p);
@@ -203,9 +222,10 @@ async function sendChunksChat(bot, chatId, text) {
   }
 }
 
-async function sendChunksChatHtml(bot, chatId, html) {
+async function sendChunksChatHtml(chatId, html) {
   for (const p of splitText(html)) {
     if (!p.trim()) continue;
+
     const ok = await safeSend(chatId, p, { parse_mode: "HTML" });
     if (ok) continue;
 
@@ -228,23 +248,23 @@ function report(title, names) {
   let out = `${title}\nНайдено: ${names.length}\n\n`;
 
   if (ban.length) {
-    out += `❌ BAN (${ban.length}):\n`;
+    out += `BAN (${ban.length}):\n`;
     ban.forEach((x, i) => {
-      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
+      out += `${i + 1}) ${x.nick} -> ${x.r.join("; ")}\n`;
     });
     out += "\n";
   }
 
   if (rev.length) {
-    out += `⚠️ REVIEW (${rev.length}):\n`;
+    out += `REVIEW (${rev.length}):\n`;
     rev.forEach((x, i) => {
-      out += `${i + 1}) ${x.nick} → ${x.r.join("; ")}\n`;
+      out += `${i + 1}) ${x.nick} -> ${x.r.join("; ")}\n`;
     });
     out += "\n";
   }
 
   if (!ban.length && !rev.length) {
-    out += "✅ Некорректных ников не найдено.\n";
+    out += "OK: некорректных ников не найдено.\n";
   }
 
   return {
@@ -274,7 +294,9 @@ function disableChunkParsing(bot) {
     try {
       c.removeAllListeners(name);
       c.on(name, () => {});
-    } catch {}
+    } catch (e) {
+      console.log("[MC] disableChunkParsing error:", e?.message || e);
+    }
   }
 
   console.log("[MC] chunk parsing disabled (safe mode)");
@@ -293,7 +315,9 @@ async function resolveMcEndpoint(host, port) {
         const best = srv[0];
         return { host: best.name, port: best.port, via: "SRV" };
       }
-    } catch {}
+    } catch (e) {
+      console.log("[MC] SRV resolve failed:", e?.message || e);
+    }
   }
 
   return { host: h, port: Number(port || 25565), via: "DIRECT" };
@@ -302,7 +326,11 @@ async function resolveMcEndpoint(host, port) {
 /* ================== TAB COMPLETE ================== */
 function tabComplete(bot, text) {
   return new Promise((res, rej) => {
-    if (!bot?._client) return rej(new Error("CLIENT_NOT_READY"));
+    if (!bot?._client) {
+      rej(new Error("CLIENT_NOT_READY"));
+      return;
+    }
+
     const c = bot._client;
 
     const to = setTimeout(() => {
@@ -312,27 +340,27 @@ function tabComplete(bot, text) {
 
     const on = (p) => {
       cleanup();
-      res(
+      const matches =
         p?.matches?.map((x) =>
           typeof x === "string" ? x : x.text || x.match || ""
-        ) || []
-      );
+        ) || [];
+      res(matches);
     };
 
     function cleanup() {
       clearTimeout(to);
       try {
         c.removeListener("tab_complete", on);
-      } catch {}
+      } catch (e) {}
       try {
         c.removeListener("tab_complete_response", on);
-      } catch {}
+      } catch (e) {}
     }
 
-    c.once("tab_complete", on);
-    c.once("tab_complete_response", on);
-
     try {
+      c.once("tab_complete", on);
+      c.once("tab_complete_response", on);
+
       c.write("tab_complete", {
         text,
         assumeCommand: true,
@@ -346,7 +374,7 @@ function tabComplete(bot, text) {
 }
 
 /* ================== MINEFLAYER ================== */
-let mc;
+let mc = null;
 let mcReady = false;
 let tabReady = false;
 let mcOnline = false;
@@ -359,10 +387,13 @@ let autoScanPrimed = false;
 
 function scheduleReconnect(reason) {
   if (reconnectTimer) return;
+
   console.log("[MC] reconnect scheduled:", reason);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connectMC().catch(() => {});
+    connectMC().catch((e) => {
+      console.log("[MC] reconnect error:", e?.message || e);
+    });
   }, 5000);
 }
 
@@ -377,14 +408,17 @@ async function connectMC() {
 
   if (mc) {
     try {
-      mc.quit?.("reconnect");
-    } catch {}
+      if (typeof mc.quit === "function") mc.quit("reconnect");
+    } catch (e) {}
+
     try {
-      mc.end?.();
-    } catch {}
+      if (typeof mc.end === "function") mc.end();
+    } catch (e) {}
+
     try {
-      mc._client?.end?.();
-    } catch {}
+      if (mc._client && typeof mc._client.end === "function") mc._client.end();
+    } catch (e) {}
+
     mc = null;
   }
 
@@ -434,6 +468,7 @@ async function connectMC() {
 
     setTimeout(async () => {
       if (!mc || mcReady || tabReady) return;
+
       try {
         const r = await tabComplete(mc, "/msg a");
         if (Array.isArray(r)) {
@@ -459,13 +494,27 @@ async function connectMC() {
 
   mc.on("messagestr", (msg) => {
     const m = String(msg).toLowerCase();
+
     if (MC_PASSWORD && !loginSent && m.includes("login")) {
       loginSent = true;
-      setTimeout(() => mc?.chat?.(`/login ${MC_PASSWORD}`), 1500);
+      setTimeout(() => {
+        try {
+          mc?.chat?.(`/login ${MC_PASSWORD}`);
+        } catch (e) {
+          console.log("[MC] login command error:", e?.message || e);
+        }
+      }, 1500);
     }
+
     if (MC_PASSWORD && !registerSent && m.includes("register")) {
       registerSent = true;
-      setTimeout(() => mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`), 1500);
+      setTimeout(() => {
+        try {
+          mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
+        } catch (e) {
+          console.log("[MC] register command error:", e?.message || e);
+        }
+      }, 1500);
     }
   });
 
@@ -483,7 +532,7 @@ async function connectMC() {
   mc.on("end", () => onDisconnect("end"));
   mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
   mc.on("error", (e) => {
-    const msg = e && (e.stack || e.message) ? e.stack || e.message : String(e);
+    const msg = e?.stack || e?.message || String(e);
     onDisconnect("error: " + msg);
   });
 
@@ -492,7 +541,9 @@ async function connectMC() {
   }, 1200);
 }
 
-connectMC().catch((e) => console.log("[MC] connect error:", e?.message || e));
+connectMC().catch((e) => {
+  console.log("[MC] connect error:", e?.message || e);
+});
 
 /* ================== SCAN HELPERS ================== */
 function clean(s) {
@@ -506,10 +557,7 @@ async function byPrefix(prefix) {
   const result = raw
     .map(clean)
     .filter(
-      (n) =>
-        n.length >= 3 &&
-        n.length <= 16 &&
-        n.toLowerCase().startsWith(pref)
+      (n) => n.length >= 3 && n.length <= 16 && n.toLowerCase().startsWith(pref)
     );
 
   console.log(`[TAB] prefix=${prefix} raw=${raw.length} filtered=${result.length}`);
@@ -518,7 +566,8 @@ async function byPrefix(prefix) {
 
 function prefixes() {
   if (AUTO_PREFIXES) {
-    return AUTO_PREFIXES.split(",")
+    return AUTO_PREFIXES
+      .split(",")
       .map((x) => x.trim())
       .filter(Boolean);
   }
@@ -615,14 +664,13 @@ OK — чисто.
     }
 
     return { decision, confidence, reason };
-  } catch {
+  } catch (e) {
     return { decision: "REVIEW", confidence: 0, reason: "Ошибка Gemini" };
   }
 }
 
 /* ================== LAST SCAN CACHE ================== */
 let lastScan = null;
-// { ts, names:[], reportText, reviewNicks:[] }
 
 /* ================== STATUS HELPERS ================== */
 let autoScanRunning = false;
@@ -692,15 +740,15 @@ function menuKeyboard() {
 }
 
 /* ================== COMMANDS ================== */
-tg.start((c) =>
-  c.reply(
+tg.start((c) => {
+  return c.reply(
     "Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/status",
     menuKeyboard()
-  )
-);
+  );
+});
 
 tg.command("status", (c) => {
-  c.reply(formatStatusText(), menuKeyboard());
+  return c.reply(formatStatusText(), menuKeyboard());
 });
 
 tg.command("tab", async (c) => {
@@ -732,6 +780,7 @@ tg.command("scanall", async (c) => {
   if (!mcReady) return c.reply("MC не готов", menuKeyboard());
 
   await c.reply("Сканирую...", menuKeyboard());
+
   const n = await collect(prefixes());
   const r = report("Full scan", n);
 
@@ -743,31 +792,29 @@ tg.command("scanall", async (c) => {
   };
 
   await sendChunksReply(c, r.out);
-  await c.reply(
-    "Готово. Можешь нажать 🤖 AI по последнему скану",
-    menuKeyboard()
-  );
+  await c.reply("Готово. Можешь нажать AI по последнему скану", menuKeyboard());
 });
 
 /* ================== BUTTON HANDLERS ================== */
 tg.action("status", async (ctx) => {
   try {
     await ctx.answerCbQuery();
-  } catch {}
+  } catch (e) {}
+
   await ctx.reply(formatStatusText(), menuKeyboard());
 });
 
 tg.action("reload_rules", async (ctx) => {
   try {
     await ctx.answerCbQuery("Reload...");
-  } catch {}
+  } catch (e) {}
 
   try {
     reloadRules();
-    await ctx.reply("✅ rules.json перезагружен", menuKeyboard());
+    await ctx.reply("rules.json перезагружен", menuKeyboard());
   } catch (e) {
     await ctx.reply(
-      "❌ rules.json reload error: " + String(e?.message || e),
+      "rules.json reload error: " + String(e?.message || e),
       menuKeyboard()
     );
   }
@@ -776,10 +823,11 @@ tg.action("reload_rules", async (ctx) => {
 tg.action("scan_all", async (ctx) => {
   try {
     await ctx.answerCbQuery("Scan...");
-  } catch {}
+  } catch (e) {}
 
   if (!mcReady) return ctx.reply("MC не готов", menuKeyboard());
-  await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
+
+  await ctx.reply("Сканирую всех...", menuKeyboard());
 
   const n = await collect(prefixes());
   const r = report("Full scan (button)", n);
@@ -792,25 +840,25 @@ tg.action("scan_all", async (ctx) => {
   };
 
   await sendChunksReply(ctx, r.out);
-  await ctx.reply("Готово. Нажми 🤖 AI по последнему скану", menuKeyboard());
+  await ctx.reply("Готово. Нажми AI по последнему скану", menuKeyboard());
 });
 
 /* ====== AI LAST SCAN ====== */
 tg.action("ai_last", async (ctx) => {
   try {
     await ctx.answerCbQuery("AI...");
-  } catch {}
+  } catch (e) {}
 
   if (!lastScan) {
     return ctx.reply(
-      "❌ Нет последнего скана. Сначала сделай /scanall или кнопку 🔎",
+      "Нет последнего скана. Сначала сделай /scanall или кнопку скана",
       menuKeyboard()
     );
   }
 
   if (!AI_ENABLED || !geminiModel) {
     return ctx.reply(
-      "❌ AI выключен (нет GEMINI_API_KEY или AI_ENABLED=0)",
+      "AI выключен (нет GEMINI_API_KEY или AI_ENABLED=0)",
       menuKeyboard()
     );
   }
@@ -818,20 +866,19 @@ tg.action("ai_last", async (ctx) => {
   const candidates = [...(lastScan.reviewNicks || [])];
   if (!candidates.length) {
     return ctx.reply(
-      "✅ В последнем скане нет REVIEW. AI нечего проверять.",
+      "В последнем скане нет REVIEW. AI нечего проверять.",
       menuKeyboard()
     );
   }
 
   await ctx.reply(
-    `🤖 AI проверяю REVIEW из последнего скана... (${candidates.length})`,
+    `AI проверяю REVIEW из последнего скана... (${candidates.length})`,
     menuKeyboard()
   );
 
   const ban = [];
   const ok = [];
   const review = [];
-
   let budget = Math.max(0, AI_BUDGET_PER_CLICK);
 
   for (const nick of candidates) {
@@ -839,6 +886,7 @@ tg.action("ai_last", async (ctx) => {
       review.push(`${nick} (лимит AI исчерпан)`);
       continue;
     }
+
     budget--;
 
     const ai = await geminiReviewNick(nick);
@@ -853,23 +901,164 @@ tg.action("ai_last", async (ctx) => {
     }
   }
 
-  let out = `🤖 AI RESULT (последний скан)\n\n`;
-  out += `🚫 BAN: ${ban.length}\n`;
-  out += `✅ OK: ${ok.length}\n`;
-  out += `⚠️ REVIEW: ${review.length}\n\n`;
+  let out = `AI RESULT (последний скан)\n\n`;
+  out += `BAN: ${ban.length}\n`;
+  out += `OK: ${ok.length}\n`;
+  out += `REVIEW: ${review.length}\n\n`;
 
-  if (ban.length) out += `🚫 BAN LIST:\n${ban.join("\n")}\n\n`;
-  if (review.length) out += `⚠️ REVIEW LIST:\n${review.join("\n")}\n\n`;
-  if (ok.length) out += `✅ OK LIST:\n${ok.join("\n")}\n\n`;
+  if (ban.length) out += `BAN LIST:\n${ban.join("\n")}\n\n`;
+  if (review.length) out += `REVIEW LIST:\n${review.join("\n")}\n\n`;
+  if (ok.length) out += `OK LIST:\n${ok.join("\n")}\n\n`;
 
   await sendChunksReply(ctx, out);
   await ctx.reply("Меню:", menuKeyboard());
 });
 
 /* ====== AI ONE NICK ====== */
-const awaitingNick = new Map(); // chatId -> userId
+const awaitingNick = new Map();
 
 tg.action("ai_one", async (ctx) => {
   try {
     await ctx.answerCbQuery();
+  } catch (e) {}
+
+  awaitingNick.set(ctx.chat.id, ctx.from.id);
+  await ctx.reply("Отправь ник одним сообщением (только ник).", menuKeyboard());
+});
+
+tg.on("text", async (ctx) => {
+  const uid = awaitingNick.get(ctx.chat.id);
+  if (!uid || uid !== ctx.from.id) return;
+
+  awaitingNick.delete(ctx.chat.id);
+
+  const nick = String(ctx.message.text || "").trim();
+  if (!nick) {
+    return ctx.reply("Пусто. Пришли ник.", menuKeyboard());
+  }
+
+  const [s, reasons] = checkNick(nick);
+  const ai = await geminiReviewNick(nick);
+
+  const out =
+    `Ник: ${nick}\n` +
+    `Rules: ${s}${reasons?.length ? ` — ${reasons.join("; ")}` : ""}\n` +
+    `AI: ${ai.decision} — ${ai.reason} (${Math.round(ai.confidence * 100)}%)\n` +
+    `Нормализация: ${norm(nick)}`;
+
+  await ctx.reply(out, menuKeyboard());
+});
+
+/* ================== AUTO SCAN ================== */
+async function runAutoScan(trigger = "timer") {
+  if (autoScanRunning) {
+    console.log("[AUTO] skipped: already running");
+    return;
+  }
+
+  console.log("[AUTO] start", {
+    trigger,
+    mcReady,
+    mcOnline,
+    hasChatId: !!CHAT_ID,
+  });
+
+  if (!mcReady) {
+    autoScanLastResult = "waiting_mc";
+    console.log("[AUTO] waiting_mc");
+    return;
+  }
+
+  if (!CHAT_ID) {
+    autoScanLastResult = "missing_chat";
+    autoScanLastError = "CHAT_ID not set";
+    console.log("[AUTO] missing_chat");
+    return;
+  }
+
+  autoScanRunning = true;
+  autoScanLastError = "";
+
+  try {
+    const n = await collect(prefixes());
+    const r = report("Auto scan", n);
+
+    lastScan = {
+      ts: Date.now(),
+      names: n,
+      reportText: r.out,
+      reviewNicks: r.reviewNicks,
+    };
+    autoScanLastRunTs = Date.now();
+
+    console.log(`[AUTO] collected names=${n.length} ban=${r.ban} review=${r.rev}`);
+
+    if (r.ban || r.rev) {
+      if (PING_USER_ID) {
+        const html = `<a href="tg://user?id=${PING_USER_ID}">&#8203;</a>\n<pre>${escapeHtml(r.out)}</pre>`;
+        await sendChunksChatHtml(CHAT_ID, html);
+      } else {
+        await sendChunksChat(CHAT_ID, r.out);
+      }
+      autoScanLastResult = "ok_hits";
+    } else {
+      autoScanLastResult = "ok_no_hits";
+    }
+
+    console.log(`[AUTO] ${trigger}: ${n.length} names, ban=${r.ban}, review=${r.rev}`);
+  } catch (e) {
+    autoScanLastResult = "error";
+    autoScanLastError = String(e?.message || e);
+    console.log("[AUTO] error:", autoScanLastError);
+
+    try {
+      await safeSend(CHAT_ID, `Auto scan error:\n${autoScanLastError}`);
+    } catch (err) {}
+  } finally {
+    autoScanRunning = false;
+    console.log("[AUTO] finish");
+  }
 }
+
+function scheduleNextAutoScan(delayMs = AUTO_SCAN_MINUTES * 60 * 1000) {
+  if (!AUTO_SCAN) return;
+
+  if (autoScanTimer) {
+    clearTimeout(autoScanTimer);
+  }
+
+  autoScanTimer = setTimeout(async () => {
+    await runAutoScan("timer");
+    scheduleNextAutoScan();
+  }, Math.max(1000, delayMs));
+}
+
+function primeAutoScan() {
+  if (!AUTO_SCAN || autoScanPrimed) return;
+
+  autoScanPrimed = true;
+  scheduleNextAutoScan(Math.min(15000, AUTO_SCAN_MINUTES * 60 * 1000));
+
+  runAutoScan("ready").catch((e) => {
+    autoScanLastResult = "error";
+    autoScanLastError = String(e?.message || e);
+  });
+}
+
+if (AUTO_SCAN) {
+  scheduleNextAutoScan();
+}
+
+/* ================== WATCHDOG ================== */
+setInterval(() => {
+  if (mcOnline && !mcReady) {
+    console.log("[WATCHDOG] mcOnline=true but mcReady=false, reconnecting");
+    scheduleReconnect("watchdog_not_ready");
+  }
+}, 30000);
+
+/* ================== START ================== */
+(async () => {
+  await launchTelegramSafely();
+  console.log("TG bot started");
+})();
