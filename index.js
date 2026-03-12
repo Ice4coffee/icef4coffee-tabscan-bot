@@ -1,4 +1,3 @@
-IceF4ry, [12.03.2026 10:24]
 import fs from "fs";
 import mineflayer from "mineflayer";
 import { Telegraf, Markup } from "telegraf";
@@ -24,7 +23,7 @@ const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
 const AI_ENABLED = (process.env.AI_ENABLED || "1") === "1";
 
-if (!BOT_TOKEN  !MC_HOST  !MC_USER) {
+if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
   throw new Error("Нужны BOT_TOKEN, MC_HOST и MC_USER");
 }
 
@@ -121,13 +120,13 @@ function report(title, names) {
     }
   }
 
-  let out = ${title}\nНайдено игроков: ${names.length}\n\n;
+  let out = `${title}\nНайдено игроков: ${names.length}\n\n`;
 
   if (ban.length) {
-    out += ❌ BAN (${ban.length}):\n;
+    out += `❌ BAN (${ban.length}):\n`;
 
     ban.forEach((x, i) => {
-      out += ${i + 1}) ${x.nick} → ${x.reasons.join(", ")}\n;
+      out += `${i + 1}) ${x.nick} → ${x.reasons.join(", ")}\n`;
     });
 
   } else {
@@ -146,7 +145,7 @@ async function resolveMcEndpoint(host, port) {
 
   try {
 
-    const srv = await resolveSrv(_minecraft._tcp.${host});
+    const srv = await resolveSrv(`_minecraft._tcp.${host}`);
 
     if (srv.length) {
       return {
@@ -189,14 +188,13 @@ async function connectMC() {
 
     if (MC_PASSWORD && m.includes("login")) {
       setTimeout(() => {
-        mc.chat(/login ${MC_PASSWORD});
+        mc.chat(`/login ${MC_PASSWORD}`);
       }, 1500);
     }
 
-IceF4ry, [12.03.2026 10:24]
-if (MC_PASSWORD && m.includes("register")) {
+    if (MC_PASSWORD && m.includes("register")) {
       setTimeout(() => {
-        mc.chat(/register ${MC_PASSWORD} ${MC_PASSWORD});
+        mc.chat(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
       }, 1500);
     }
 
@@ -233,7 +231,7 @@ async function tabComplete(prefix) {
     client.once("tab_complete", on);
 
     client.write("tab_complete", {
-      text: /msg ${prefix},
+      text: `/msg ${prefix}`,
       assumeCommand: true
     });
 
