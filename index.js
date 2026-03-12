@@ -9,8 +9,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
+const PARTY_OWNER = (process.env.PARTY_OWNER || "").trim().toLowerCase();
 
-// default mode
 let currentMode = (process.env.BOT_MODE || "moderation").trim().toLowerCase();
 if (!["moderation", "helper"].includes(currentMode)) currentMode = "moderation";
 
@@ -21,7 +21,7 @@ const MC_USER = (process.env.MC_USER || "").trim();
 const MC_PASSWORD = process.env.MC_PASSWORD || "";
 const MC_VERSION = process.env.MC_VERSION || "1.8.9";
 
-// helper connection (fallback on moderation env)
+// helper connection
 const HELPER_MC_HOST = (process.env.HELPER_MC_HOST || MC_HOST || "").trim();
 const HELPER_MC_PORT = Number(process.env.HELPER_MC_PORT || MC_PORT || 25565);
 const HELPER_MC_USER = (process.env.HELPER_MC_USER || MC_USER || "").trim();
@@ -64,6 +64,10 @@ function isModerationMode() {
 
 function stripColors(s = "") {
   return String(s).replace(/§./g, "");
+}
+
+function stripMcFormatting(s = "") {
+  return String(s).replace(/§./g, "").trim();
 }
 
 function escapeHtml(s = "") {
@@ -358,7 +362,6 @@ function detectFlood(nick, message) {
 
   if (!floodHistory[key]) floodHistory[key] = [];
   floodHistory[key].push({ msg, time: now });
-
   floodHistory[key] = floodHistory[key].filter(x => now - x.time < 12000);
 
   const same = floodHistory[key].filter(x => x.msg === msg);
@@ -424,6 +427,43 @@ function getActiveMcConfig() {
   };
 }
 
+/* ================== PARTY CLICK HELPER ================== */
+function extractClickCommandFromMessage(jsonMsg) {
+  const commands = [];
+
+  function walk(node) {
+    if (!node) return;
+
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+
+    if (typeof node === "object") {
+      if (
+        node.clickEvent &&
+        node.clickEvent.action === "run_command" &&
+        typeof node.clickEvent.value === "string"
+      ) {
+        commands.push(node.clickEvent.value);
+      }
+
+      if (node.extra) walk(node.extra);
+      if (node.with) walk(node.with);
+
+      for (const key of Object.keys(node)) {
+        if (key !== "extra" && key !== "with" && key !== "clickEvent") {
+          const value = node[key];
+          if (typeof value === "object") walk(value);
+        }
+      }
+    }
+  }
+
+  walk(jsonMsg);
+  return commands;
+}
+
 /* ================== MC STATE ================== */
 let mc = null;
 let mcReady = false;
@@ -435,14 +475,12 @@ let connecting = false;
 let loginSent = false;
 let registerSent = false;
 
-// moderation state
 let lastScan = null;
 let autoScanRunning = false;
 let autoScanLastRunTs = 0;
 let autoScanLastResult = "not_started";
 let autoScanLastError = "";
 
-// helper state
 let helperChatLogs = [];
 let helperScanAlerts = 0;
 let helperBridgeNumber = HELPER_BRIDGE_NUMBER_DEFAULT;
@@ -454,15 +492,10 @@ let helperRecentAlerts = new Map();
 let sidebarLines = [];
 let helperInBridging = false;
 
-// viewer state
 let viewerStarted = false;
 let viewerBotRef = null;
 
 /* ================== SIDEBAR DETECT ================== */
-function stripMcFormatting(s = "") {
-  return String(s).replace(/§./g, "").trim();
-}
-
 function resetSidebarState() {
   sidebarLines = [];
   helperInBridging = false;
@@ -482,7 +515,6 @@ function updateHelperPresenceFromText(text = "") {
 
 function helperLooksInBridging() {
   if (helperInBridging) return true;
-
   const joined = sidebarLines.join(" ").toLowerCase();
   return (
     joined.includes("bridging") ||
@@ -752,7 +784,6 @@ async function helperTryJoinBridge() {
         }
       }
 
-      // первое меню: Bridging в слоте 13
       if (title.toLowerCase().includes("меню") || title.toLowerCase().includes("game")) {
         console.log("[HELPER] clicking Bridging slot 13");
         await sleep(300);
@@ -760,27 +791,17 @@ async function helperTryJoinBridge() {
         return;
       }
 
-      // второе меню: fastbridge слоты
       if (title.toLowerCase().includes("bridging")) {
-        const slotMap = {
-          1: 11,
-          2: 13,
-          3: 15,
-          4: 17
-        };
-
+        const slotMap = { 1: 11, 2: 13, 3: 15, 4: 17 };
         const slot = slotMap[helperBridgeNumber] || 11;
-        console.log("[HELPER] clicking fastbridge slot", slot);
 
+        console.log("[HELPER] clicking fastbridge slot", slot);
         await sleep(300);
         await mc.clickWindow(slot, 0, 0);
 
         setTimeout(() => {
-          if (helperLooksInBridging()) {
-            success();
-          } else {
-            fail();
-          }
+          if (helperLooksInBridging()) success();
+          else fail();
         }, 2500);
 
         return;
@@ -816,11 +837,8 @@ async function helperTryJoinBridge() {
     }, 5000);
 
     setTimeout(() => {
-      if (helperLooksInBridging()) {
-        success();
-      } else {
-        fail();
-      }
+      if (helperLooksInBridging()) success();
+      else fail();
     }, 9000);
   } catch (e) {
     console.log("[HELPER] join error:", e?.message || e);
@@ -915,6 +933,17 @@ function resetMcStateForReconnect() {
 
 function scheduleReconnect(reason) {
   console.log("[MC] reconnect scheduled:", reason);
+
+  if (isHelperMode()) {
+    const r = String(reason || "").toLowerCase();
+    const hard = ["kicked", "socket", "timeout", "reset", "closed", "econnreset", "end", "disconnected"];
+    const shouldReconnect = hard.some(x => r.includes(x));
+    if (!shouldReconnect) {
+      console.log("[HELPER] soft disconnect, skip reconnect");
+      return;
+    }
+  }
+
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -1002,6 +1031,41 @@ async function connectMC() {
         if (packet?.prefix) updateHelperPresenceFromText(packet.prefix);
         if (packet?.suffix) updateHelperPresenceFromText(packet.suffix);
       } catch {}
+    });
+
+    client.on("chat", async (packet) => {
+      try {
+        const commands = extractClickCommandFromMessage(packet?.message);
+        if (!commands.length) return;
+
+        const rawText = stripColors(JSON.stringify(packet?.message || "")).toLowerCase();
+        if (PARTY_OWNER && !rawText.includes(PARTY_OWNER)) return;
+
+        for (const cmd of commands) {
+          const low = String(cmd).toLowerCase();
+
+          if (
+            low.includes("/p accept") ||
+            low.includes("/party accept") ||
+            low.includes("party accept")
+          ) {
+            console.log("[PARTY] clickable accept found:", cmd);
+
+            setTimeout(() => {
+              try {
+                mc.chat(cmd);
+                console.log("[PARTY] accepted via clickable command:", cmd);
+              } catch (e) {
+                console.log("[PARTY] click command error:", e?.message || e);
+              }
+            }, 800);
+
+            break;
+          }
+        }
+      } catch (e) {
+        console.log("[PARTY] chat parse error:", e?.message || e);
+      }
     });
   }
 
@@ -1115,15 +1179,33 @@ async function connectMC() {
       }
     }
 
+    // clickable fallback via plain text
+    const lowPlain = plain.toLowerCase();
+    if (
+      lowPlain.includes("пригласил вас в группу") ||
+      lowPlain.includes("пригласил вас в пати") ||
+      lowPlain.includes("invited you to a party")
+    ) {
+      if (!PARTY_OWNER || lowPlain.includes(PARTY_OWNER)) {
+        setTimeout(() => {
+          try {
+            mc.chat("/p accept");
+            console.log("[PARTY] accepted fallback via /p accept");
+          } catch (e) {
+            console.log("[PARTY] fallback accept error:", e?.message || e);
+          }
+        }, 1200);
+      }
+    }
+
     if (
       cfg.password &&
       !loginSent &&
       (
-        m.includes("login") ||
         m.includes("/login") ||
+        m.includes("войдите") ||
         m.includes("авториз") ||
-        m.includes("войд") ||
-        m.includes("log in")
+        m.includes("login:")
       )
     ) {
       loginSent = true;
@@ -1141,9 +1223,10 @@ async function connectMC() {
       cfg.password &&
       !registerSent &&
       (
-        m.includes("register") ||
-        m.includes("/register") ||
-        m.includes("зарегистр")
+        m.includes("/register ") ||
+        m.includes("/reg ") ||
+        m.includes("зарегистрируйтесь") ||
+        m.includes("введите /register")
       )
     ) {
       registerSent = true;
@@ -1180,13 +1263,17 @@ async function connectMC() {
     loginSent = false;
     registerSent = false;
     helperBridgeJoined = false;
-    console.log("[MC] disconnected:", reason);
+    console.log("[MC] disconnected FULL:", reason);
     scheduleReconnect(reason);
   };
 
   mc.on("end", () => onDisconnect("end"));
-  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
+  mc.on("kicked", (r) => {
+    console.log("[MC] kicked raw:", r);
+    onDisconnect("kicked: " + String(r));
+  });
   mc.on("error", (e) => {
+    console.log("[MC] error raw:", e);
     const msg = (e && (e.stack || e.message)) ? (e.stack || e.message) : String(e);
     onDisconnect("error: " + msg);
   });
