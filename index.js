@@ -815,8 +815,7 @@ tg.start(guard((c) => {
       "/scanall — полный ручной скан",
       "/autoscan — запустить автоскан сейчас",
       "/status — статус",
-    ].join("
-"),
+    ].join("\n"),
     menuKeyboard()
   );
 }));
