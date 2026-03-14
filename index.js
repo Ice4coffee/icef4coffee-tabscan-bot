@@ -8,11 +8,16 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
+const ALLOWED_USER_IDS = new Set(
+  String(process.env.ALLOWED_USER_IDS || process.env.PING_USER_ID || "")
+    .split(",")
+    .map((x) => Number(String(x).trim()))
+    .filter((x) => Number.isInteger(x) && x > 0)
+);
 
 const MC_HOST = (process.env.MC_HOST || "").trim();
 const MC_PORT = Number(process.env.MC_PORT || 25565);
 const MC_USER = process.env.MC_USER;
-
 const MC_VERSION = process.env.MC_VERSION || "1.8.9";
 const MC_PASSWORD = process.env.MC_PASSWORD;
 
@@ -20,8 +25,12 @@ const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim();
-
 const READY_AFTER_MS = Number(process.env.READY_AFTER_MS || 1500);
+const STARTUP_SCAN_DELAY_MS = Number(process.env.STARTUP_SCAN_DELAY_MS || 8000);
+const TAB_WARMUP_RETRIES = Number(process.env.TAB_WARMUP_RETRIES || 4);
+const TAB_WARMUP_DELAY_MS = Number(process.env.TAB_WARMUP_DELAY_MS || 2000);
+const AUTO_RETRY_ON_FAIL_MINUTES = Number(process.env.AUTO_RETRY_ON_FAIL_MINUTES || 2);
+const MAX_PREFIX_ERRORS_IN_REPORT = Number(process.env.MAX_PREFIX_ERRORS_IN_REPORT || 8);
 
 // Gemini
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
@@ -38,6 +47,36 @@ if (!BOT_TOKEN || !MC_HOST || !MC_USER) {
 /* ================== TELEGRAM BOT ================== */
 const tg = new Telegraf(BOT_TOKEN);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmtTime = (ts) => (ts ? new Date(ts).toLocaleString("ru-RU") : "—");
+
+function isAllowedUser(userId) {
+  if (!userId) return false;
+  if (ALLOWED_USER_IDS.size === 0) return true;
+  return ALLOWED_USER_IDS.has(Number(userId));
+}
+
+async function denyAccess(ctx) {
+  try {
+    if (ctx?.answerCbQuery) {
+      await ctx.answerCbQuery("Нет доступа", { show_alert: true });
+      return;
+    }
+  } catch {}
+
+  try {
+    await ctx.reply("⛔ У тебя нет доступа к этому боту.");
+  } catch {}
+}
+
+function guard(handler) {
+  return async (ctx, ...args) => {
+    const uid = ctx?.from?.id;
+    if (!isAllowedUser(uid)) {
+      return denyAccess(ctx);
+    }
+    return handler(ctx, ...args);
+  };
+}
 
 tg.catch((err) => {
   console.log("TG handler error:", err?.message || err);
@@ -206,18 +245,18 @@ function splitText(t, max = 3500) {
   return parts;
 }
 
-async function sendChunksReply(ctx, text) {
+async function sendChunksReply(ctx, text, extra) {
   for (const p of splitText(text)) {
     if (p.trim()) {
-      await ctx.reply(p);
+      await ctx.reply(p, extra);
     }
   }
 }
 
-async function sendChunksChat(chatId, text) {
+async function sendChunksChat(chatId, text, extra) {
   for (const p of splitText(text)) {
     if (!p.trim()) continue;
-    const ok = await safeSend(chatId, p);
+    const ok = await safeSend(chatId, p, extra);
     if (!ok) throw new Error("TG_SEND_FAILED");
   }
 }
@@ -226,7 +265,7 @@ async function sendChunksChatHtml(chatId, html) {
   for (const p of splitText(html)) {
     if (!p.trim()) continue;
 
-    const ok = await safeSend(chatId, p, { parse_mode: "HTML" });
+    const ok = await safeSend(chatId, p, { parse_mode: "HTML", disable_web_page_preview: true });
     if (ok) continue;
 
     const fallback = p.replace(/<[^>]+>/g, "");
@@ -235,7 +274,7 @@ async function sendChunksChatHtml(chatId, html) {
   }
 }
 
-function report(title, names) {
+function report(title, names, meta = {}) {
   const ban = [];
   const rev = [];
 
@@ -245,10 +284,15 @@ function report(title, names) {
     else if (s === "REVIEW") rev.push({ nick, r });
   }
 
-  let out = `${title}\nНайдено: ${names.length}\n\n`;
+  let out = `📦 ${title}\n`;
+  out += `👥 Найдено ников: ${names.length}\n`;
+  if (meta.okPrefixes != null || meta.failedPrefixes != null) {
+    out += `🧩 Префиксы: ok=${meta.okPrefixes || 0}, fail=${meta.failedPrefixes || 0}\n`;
+  }
+  out += "\n";
 
   if (ban.length) {
-    out += `BAN (${ban.length}):\n`;
+    out += `⛔ BAN (${ban.length}):\n`;
     ban.forEach((x, i) => {
       out += `${i + 1}) ${x.nick} -> ${x.r.join("; ")}\n`;
     });
@@ -256,7 +300,7 @@ function report(title, names) {
   }
 
   if (rev.length) {
-    out += `REVIEW (${rev.length}):\n`;
+    out += `🟡 REVIEW (${rev.length}):\n`;
     rev.forEach((x, i) => {
       out += `${i + 1}) ${x.nick} -> ${x.r.join("; ")}\n`;
     });
@@ -264,7 +308,14 @@ function report(title, names) {
   }
 
   if (!ban.length && !rev.length) {
-    out += "OK: некорректных ников не найдено.\n";
+    out += "✅ Некорректных ников не найдено.\n";
+  }
+
+  if (meta.errors?.length) {
+    out += `\n⚠️ Ошибки префиксов (${meta.errors.length}):\n`;
+    for (const err of meta.errors.slice(0, MAX_PREFIX_ERRORS_IN_REPORT)) {
+      out += `• ${err}\n`;
+    }
   }
 
   return {
@@ -272,7 +323,13 @@ function report(title, names) {
     ban: ban.length,
     rev: rev.length,
     reviewNicks: rev.map((x) => x.nick),
+    banNicks: ban.map((x) => x.nick),
   };
+}
+
+function reportHtml(title, names, meta = {}) {
+  const r = report(title, names, meta);
+  return `<b>${escapeHtml(title)}</b>\n<pre>${escapeHtml(r.out)}</pre>`;
 }
 
 /* ================== SAFE MODE: DISABLE CHUNK PARSING ================== */
@@ -351,10 +408,10 @@ function tabComplete(bot, text) {
       clearTimeout(to);
       try {
         c.removeListener("tab_complete", on);
-      } catch (e) {}
+      } catch {}
       try {
         c.removeListener("tab_complete_response", on);
-      } catch (e) {}
+      } catch {}
     }
 
     try {
@@ -397,6 +454,24 @@ function scheduleReconnect(reason) {
   }, 5000);
 }
 
+async function warmupTabReady(bot) {
+  for (let i = 1; i <= TAB_WARMUP_RETRIES; i++) {
+    try {
+      const r = await tabComplete(bot, "/msg a");
+      if (Array.isArray(r)) {
+        tabReady = true;
+        mcReady = true;
+        console.log(`[MC] TAB ready on try ${i}`);
+        return true;
+      }
+    } catch (e) {
+      console.log(`[MC] TAB warmup ${i}/${TAB_WARMUP_RETRIES} failed:`, e?.message || e);
+      await sleep(TAB_WARMUP_DELAY_MS);
+    }
+  }
+  return false;
+}
+
 async function connectMC() {
   if (connecting) return;
   connecting = true;
@@ -406,43 +481,40 @@ async function connectMC() {
     reconnectTimer = null;
   }
 
-  if (mc) {
-    try {
-      if (typeof mc.quit === "function") mc.quit("reconnect");
-    } catch (e) {}
-
-    try {
-      if (typeof mc.end === "function") mc.end();
-    } catch (e) {}
-
-    try {
-      if (mc._client && typeof mc._client.end === "function") mc._client.end();
-    } catch (e) {}
-
-    mc = null;
-  }
-
-  mcReady = false;
-  tabReady = false;
-  mcOnline = false;
-  mcLastError = "";
-  loginSent = false;
-  registerSent = false;
-  autoScanPrimed = false;
-
-  const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
-
-  console.log("[MC DEBUG]", {
-    inputHost: MC_HOST,
-    inputPort: MC_PORT,
-    resolvedHost: ep.host,
-    resolvedPort: ep.port,
-    via: ep.via,
-    version: MC_VERSION,
-    user: MC_USER,
-  });
-
   try {
+    if (mc) {
+      try {
+        if (typeof mc.quit === "function") mc.quit("reconnect");
+      } catch {}
+      try {
+        if (typeof mc.end === "function") mc.end();
+      } catch {}
+      try {
+        if (mc._client && typeof mc._client.end === "function") mc._client.end();
+      } catch {}
+      mc = null;
+    }
+
+    mcReady = false;
+    tabReady = false;
+    mcOnline = false;
+    mcLastError = "";
+    loginSent = false;
+    registerSent = false;
+    autoScanPrimed = false;
+
+    const ep = await resolveMcEndpoint(MC_HOST, MC_PORT);
+
+    console.log("[MC DEBUG]", {
+      inputHost: MC_HOST,
+      inputPort: MC_PORT,
+      resolvedHost: ep.host,
+      resolvedPort: ep.port,
+      via: ep.via,
+      version: MC_VERSION,
+      user: MC_USER,
+    });
+
     mc = mineflayer.createBot({
       host: ep.host,
       port: ep.port,
@@ -450,95 +522,83 @@ async function connectMC() {
       version: MC_VERSION,
       viewDistance: 1,
     });
+
+    mc.on("login", () => {
+      disableChunkParsing(mc);
+      mcOnline = true;
+      mcReady = false;
+      mcLastError = "";
+      console.log("[MC] login");
+    });
+
+    mc.on("spawn", async () => {
+      console.log("[MC] spawn");
+      await sleep(READY_AFTER_MS);
+
+      const ok = await warmupTabReady(mc);
+      if (!ok) {
+        mcReady = false;
+        tabReady = false;
+        mcLastError = "TAB warmup failed after spawn";
+        console.log("[MC] TAB warmup failed, reconnecting...");
+        scheduleReconnect("tab_warmup_failed");
+        return;
+      }
+
+      primeAutoScan();
+      console.log("[MC] READY via SPAWN+TAB");
+    });
+
+    mc.on("messagestr", (msg) => {
+      const m = String(msg).toLowerCase();
+
+      if (MC_PASSWORD && !loginSent && m.includes("login")) {
+        loginSent = true;
+        setTimeout(() => {
+          try {
+            mc?.chat?.(`/login ${MC_PASSWORD}`);
+          } catch (e) {
+            console.log("[MC] login command error:", e?.message || e);
+          }
+        }, 1500);
+      }
+
+      if (MC_PASSWORD && !registerSent && m.includes("register")) {
+        registerSent = true;
+        setTimeout(() => {
+          try {
+            mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
+          } catch (e) {
+            console.log("[MC] register command error:", e?.message || e);
+          }
+        }, 1500);
+      }
+    });
+
+    const onDisconnect = (reason) => {
+      mcReady = false;
+      tabReady = false;
+      mcOnline = false;
+      mcLastError = reason;
+      loginSent = false;
+      registerSent = false;
+      console.log("[MC] disconnected:", reason);
+      scheduleReconnect(reason);
+    };
+
+    mc.on("end", () => onDisconnect("end"));
+    mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
+    mc.on("error", (e) => {
+      const msg = e?.stack || e?.message || String(e);
+      onDisconnect("error: " + msg);
+    });
   } catch (e) {
-    mcLastError = "createBot failed: " + String(e?.message || e);
+    mcLastError = "createBot/connect failed: " + String(e?.message || e);
     console.log("[MC]", mcLastError);
     scheduleReconnect("createBot");
+  } finally {
     connecting = false;
-    return;
   }
-
-  mc.on("login", () => {
-    disableChunkParsing(mc);
-
-    mcOnline = true;
-    mcReady = false;
-    mcLastError = "";
-    console.log("[MC] login");
-
-    setTimeout(async () => {
-      if (!mc || mcReady || tabReady) return;
-
-      try {
-        const r = await tabComplete(mc, "/msg a");
-        if (Array.isArray(r)) {
-          tabReady = true;
-          mcReady = true;
-          primeAutoScan();
-          console.log("[MC] READY via TAB_COMPLETE");
-        }
-      } catch (e) {
-        console.log("[MC] TAB readiness failed:", e?.message || e);
-      }
-    }, 2500);
-  });
-
-  mc.on("spawn", () => {
-    console.log("[MC] spawn");
-    setTimeout(() => {
-      mcReady = true;
-      primeAutoScan();
-      console.log("[MC] READY via SPAWN");
-    }, READY_AFTER_MS);
-  });
-
-  mc.on("messagestr", (msg) => {
-    const m = String(msg).toLowerCase();
-
-    if (MC_PASSWORD && !loginSent && m.includes("login")) {
-      loginSent = true;
-      setTimeout(() => {
-        try {
-          mc?.chat?.(`/login ${MC_PASSWORD}`);
-        } catch (e) {
-          console.log("[MC] login command error:", e?.message || e);
-        }
-      }, 1500);
-    }
-
-    if (MC_PASSWORD && !registerSent && m.includes("register")) {
-      registerSent = true;
-      setTimeout(() => {
-        try {
-          mc?.chat?.(`/register ${MC_PASSWORD} ${MC_PASSWORD}`);
-        } catch (e) {
-          console.log("[MC] register command error:", e?.message || e);
-        }
-      }, 1500);
-    }
-  });
-
-  const onDisconnect = (reason) => {
-    mcReady = false;
-    tabReady = false;
-    mcOnline = false;
-    mcLastError = reason;
-    loginSent = false;
-    registerSent = false;
-    console.log("[MC] disconnected:", reason);
-    scheduleReconnect(reason);
-  };
-
-  mc.on("end", () => onDisconnect("end"));
-  mc.on("kicked", (r) => onDisconnect("kicked: " + String(r)));
-  mc.on("error", (e) => {
-    const msg = e?.stack || e?.message || String(e);
-    onDisconnect("error: " + msg);
-  });
-
-  setTimeout(() => {
-    connecting = false;
-  }, 1200);
 }
 
 connectMC().catch((e) => {
@@ -551,17 +611,20 @@ function clean(s) {
 }
 
 async function byPrefix(prefix) {
+  if (!mc || !mcReady || !tabReady) {
+    throw new Error("MC_OR_TAB_NOT_READY");
+  }
+
   const raw = await tabComplete(mc, `/msg ${prefix}`);
   const pref = clean(prefix).toLowerCase();
 
   const result = raw
     .map(clean)
-    .filter(
-      (n) => n.length >= 3 && n.length <= 16 && n.toLowerCase().startsWith(pref)
-    );
+    .filter((n) => n.length >= 3 && n.length <= 16)
+    .filter((n) => (pref ? n.toLowerCase().startsWith(pref) : true));
 
   console.log(`[TAB] prefix=${prefix} raw=${raw.length} filtered=${result.length}`);
-  return result;
+  return [...new Set(result)];
 }
 
 function prefixes() {
@@ -580,7 +643,7 @@ function prefixes() {
 }
 
 async function collect(ps) {
-  if (!mcReady) throw new Error("MC_NOT_READY");
+  if (!mcReady || !tabReady) throw new Error("MC_NOT_READY");
 
   const all = new Set();
   let okPrefixes = 0;
@@ -588,7 +651,7 @@ async function collect(ps) {
   const errors = [];
 
   for (const p of ps) {
-    if (!mcReady) throw new Error("MC_NOT_READY");
+    if (!mcReady || !tabReady) throw new Error("MC_NOT_READY");
 
     try {
       const found = await byPrefix(p);
@@ -612,7 +675,12 @@ async function collect(ps) {
     throw new Error("ALL_PREFIXES_FAILED: " + errors.slice(0, 5).join(" | "));
   }
 
-  return [...all];
+  return {
+    names: [...all],
+    okPrefixes,
+    failedPrefixes,
+    errors,
+  };
 }
 
 /* ================== GEMINI AI ================== */
@@ -629,17 +697,7 @@ async function geminiReviewNick(nick) {
 
   const normalized = norm(nick);
 
-  const prompt = `
-Верни СТРОГО JSON без текста вокруг:
-{"decision":"BAN|REVIEW|OK","confidence":0.0,"reason":"кратко"}
-
-BAN — явный мат/оскорбления/расизм/экстремизм/18+/наркотики/читы/маскировка под персонал/проект.
-REVIEW — сомнительно/намёк/двусмысленно.
-OK — чисто.
-
-Ник: ${nick}
-Нормализация: ${normalized}
-`;
+  const prompt = `Верни СТРОГО JSON без текста вокруг:\n{"decision":"BAN|REVIEW|OK","confidence":0.0,"reason":"кратко"}\n\nBAN — явный мат/оскорбления/расизм/экстремизм/18+/наркотики/читы/маскировка под персонал/проект.\nREVIEW — сомнительно/намёк/двусмысленно.\nOK — чисто.\n\nНик: ${nick}\nНормализация: ${normalized}`;
 
   try {
     const result = await geminiModel.generateContent(prompt);
@@ -664,7 +722,7 @@ OK — чисто.
     }
 
     return { decision, confidence, reason };
-  } catch (e) {
+  } catch {
     return { decision: "REVIEW", confidence: 0, reason: "Ошибка Gemini" };
   }
 }
@@ -675,13 +733,15 @@ let lastScan = null;
 /* ================== STATUS HELPERS ================== */
 let autoScanRunning = false;
 let autoScanLastRunTs = 0;
+let autoScanLastDurationMs = 0;
 let autoScanLastResult = "not_started";
 let autoScanLastError = "";
 let autoScanTimer = null;
+let autoScanNextRunTs = 0;
 
 function formatMcStatus() {
-  if (mcOnline && mcReady) return "✅ на сервере (готов)";
-  if (mcOnline) return "🟡 подключён, но не готов";
+  if (mcOnline && mcReady && tabReady) return "✅ на сервере и готов к tab";
+  if (mcOnline) return "🟡 подключён, но не прогрет";
   return "❌ не в сети";
 }
 
@@ -689,7 +749,7 @@ function formatAutoScanStatus() {
   if (!AUTO_SCAN) return "❌ выключен";
   if (autoScanRunning) return "🔄 идёт скан";
   if (autoScanLastResult === "not_started") return "⏳ ожидает первого запуска";
-  if (autoScanLastResult === "waiting_mc") return "⏳ ожидает готовности MC";
+  if (autoScanLastResult === "waiting_mc") return "⏳ ждёт готовности Minecraft";
   if (autoScanLastResult === "missing_chat") return "❌ нет CHAT_ID";
   if (autoScanLastResult === "ok_no_hits") return "✅ последний проход без совпадений";
   if (autoScanLastResult === "ok_hits") return "⚠️ последний проход нашёл совпадения";
@@ -701,26 +761,30 @@ function formatAutoScanStatus() {
 function formatStatusText() {
   const ai = AI_ENABLED && geminiModel ? "✅ включён" : "❌ выключен";
   const last = lastScan
-    ? `✅ есть (${Math.round((Date.now() - lastScan.ts) / 1000)}с назад)`
+    ? `✅ ${lastScan.names.length} ников, ${Math.round((Date.now() - lastScan.ts) / 1000)}с назад`
     : "❌ нет";
   const autoAge = autoScanLastRunTs
     ? `${Math.round((Date.now() - autoScanLastRunTs) / 1000)}с назад`
     : "ещё не запускался";
+  const nextRun = autoScanNextRunTs ? fmtTime(autoScanNextRunTs) : "—";
 
   return [
-    `MC статус: ${formatMcStatus()}`,
-    `Ник: ${MC_USER}`,
-    `Версия: ${MC_VERSION}`,
-    `AI (Gemini): ${ai}`,
-    `Last scan: ${last}`,
-    `Auto scan: ${formatAutoScanStatus()}`,
-    `Auto scan last run: ${autoAge}`,
-    `MC ready: ${mcReady}`,
-    `MC online: ${mcOnline}`,
-    `Auto running: ${autoScanRunning}`,
-    `Auto result: ${autoScanLastResult}`,
-    mcLastError ? `MC error: ${mcLastError}` : "",
-    autoScanLastError ? `Auto scan error: ${autoScanLastError}` : "",
+    `🎮 MC статус: ${formatMcStatus()}`,
+    `👤 Ник: ${MC_USER}`,
+    `🧱 Версия: ${MC_VERSION}`,
+    `🤖 AI (Gemini): ${ai}`,
+    `📦 Last scan: ${last}`,
+    `🔁 Auto scan: ${formatAutoScanStatus()}`,
+    `🕒 Auto last run: ${autoAge}`,
+    `⏱ Последняя длительность: ${autoScanLastDurationMs}ms`,
+    `⏭ Следующий запуск: ${nextRun}`,
+    `✅ MC ready: ${mcReady}`,
+    `✅ TAB ready: ${tabReady}`,
+    `✅ MC online: ${mcOnline}`,
+    `🔄 Auto running: ${autoScanRunning}`,
+    `📌 Auto result: ${autoScanLastResult}`,
+    mcLastError ? `❗ MC error: ${mcLastError}` : "",
+    autoScanLastError ? `❗ Auto error: ${autoScanLastError}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -729,125 +793,153 @@ function formatStatusText() {
 /* ================== BUTTONS MENU ================== */
 function menuKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("🔎 Скан всех (rules)", "scan_all")],
-    [Markup.button.callback("🤖 AI по последнему скану", "ai_last")],
+    [Markup.button.callback("🔎 Скан всех", "scan_all")],
+    [Markup.button.callback("🤖 AI по последнему", "ai_last")],
     [Markup.button.callback("🧪 AI один ник", "ai_one")],
+    [Markup.button.callback("🔁 Автоскан сейчас", "auto_now")],
     [
       Markup.button.callback("📊 Статус", "status"),
-      Markup.button.callback("🔃 Reload rules", "reload_rules"),
+      Markup.button.callback("♻️ Reload rules", "reload_rules"),
     ],
   ]);
 }
 
 /* ================== COMMANDS ================== */
-tg.start((c) => {
+tg.start(guard((c) => {
   return c.reply(
-    "Готов.\n/tab <префикс>\n/tabcheck <префикс>\n/scanall\n/status",
+    [
+      "🚀 Бот запущен.",
+      "",
+      "/tab <префикс> — показать ники по префиксу",
+      "/tabcheck <префикс> — проверить по rules",
+      "/scanall — полный ручной скан",
+      "/autoscan — запустить автоскан сейчас",
+      "/status — статус",
+    ].join("
+"),
     menuKeyboard()
   );
-});
+}));
 
-tg.command("status", (c) => {
-  return c.reply(formatStatusText(), menuKeyboard());
-});
+tg.command("status", guard((c) => c.reply(formatStatusText(), menuKeyboard())));
 
-tg.command("tab", async (c) => {
-  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+tg.command("autoscan", guard(async (c) => {
+  await c.reply("🔁 Запускаю автоскан вручную...", menuKeyboard());
+  await runAutoScan("manual_command");
+  await c.reply(formatStatusText(), menuKeyboard());
+}));
+
+tg.command("tab", guard(async (c) => {
+  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
   const a = c.message.text.split(" ").slice(1).join(" ");
   const n = [...new Set(await byPrefix(a))];
 
-  let t = `Tab ${a}\nНайдено: ${n.length}\n\n`;
+  let t = `🔎 Tab ${a}
+Найдено: ${n.length}
+
+`;
   n.forEach((x, i) => {
-    t += `${i + 1}) ${x}\n`;
+    t += `${i + 1}) ${x}
+`;
   });
 
   await sendChunksReply(c, t);
   await c.reply("Меню:", menuKeyboard());
-});
+}));
 
-tg.command("tabcheck", async (c) => {
-  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+tg.command("tabcheck", guard(async (c) => {
+  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
   const a = c.message.text.split(" ").slice(1).join(" ");
   const n = await byPrefix(a);
 
   await sendChunksReply(c, report(`Tabcheck ${a}`, n).out);
   await c.reply("Меню:", menuKeyboard());
-});
+}));
 
-tg.command("scanall", async (c) => {
-  if (!mcReady) return c.reply("MC не готов", menuKeyboard());
+tg.command("scanall", guard(async (c) => {
+  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
-  await c.reply("Сканирую...", menuKeyboard());
+  await c.reply("🔎 Сканирую всех...", menuKeyboard());
 
-  const n = await collect(prefixes());
-  const r = report("Full scan", n);
+  const scan = await collect(prefixes());
+  const r = report("Ручной full scan", scan.names, scan);
 
   lastScan = {
     ts: Date.now(),
-    names: n,
+    names: scan.names,
     reportText: r.out,
     reviewNicks: r.reviewNicks,
   };
 
   await sendChunksReply(c, r.out);
-  await c.reply("Готово. Можешь нажать AI по последнему скану", menuKeyboard());
-});
+  await c.reply("✅ Готово. Можно нажать AI по последнему скану.", menuKeyboard());
+}));
 
 /* ================== BUTTON HANDLERS ================== */
-tg.action("status", async (ctx) => {
+tg.action("status", guard(async (ctx) => {
   try {
     await ctx.answerCbQuery();
-  } catch (e) {}
+  } catch {}
 
   await ctx.reply(formatStatusText(), menuKeyboard());
-});
+}));
 
-tg.action("reload_rules", async (ctx) => {
+tg.action("reload_rules", guard(async (ctx) => {
   try {
     await ctx.answerCbQuery("Reload...");
-  } catch (e) {}
+  } catch {}
 
   try {
     reloadRules();
-    await ctx.reply("rules.json перезагружен", menuKeyboard());
+    await ctx.reply("♻️ rules.json перезагружен", menuKeyboard());
   } catch (e) {
     await ctx.reply(
       "rules.json reload error: " + String(e?.message || e),
       menuKeyboard()
     );
   }
-});
+}));
 
-tg.action("scan_all", async (ctx) => {
+tg.action("scan_all", guard(async (ctx) => {
   try {
     await ctx.answerCbQuery("Scan...");
-  } catch (e) {}
+  } catch {}
 
-  if (!mcReady) return ctx.reply("MC не готов", menuKeyboard());
+  if (!mcReady || !tabReady) return ctx.reply("MC/TAB не готовы", menuKeyboard());
 
-  await ctx.reply("Сканирую всех...", menuKeyboard());
+  await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
 
-  const n = await collect(prefixes());
-  const r = report("Full scan (button)", n);
+  const scan = await collect(prefixes());
+  const r = report("Full scan (button)", scan.names, scan);
 
   lastScan = {
     ts: Date.now(),
-    names: n,
+    names: scan.names,
     reportText: r.out,
     reviewNicks: r.reviewNicks,
   };
 
   await sendChunksReply(ctx, r.out);
-  await ctx.reply("Готово. Нажми AI по последнему скану", menuKeyboard());
-});
+  await ctx.reply("✅ Готово. Нажми AI по последнему скану.", menuKeyboard());
+}));
+
+tg.action("auto_now", guard(async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Auto scan...");
+  } catch {}
+
+  await ctx.reply("🔁 Форсирую автоскан...", menuKeyboard());
+  await runAutoScan("manual_button");
+  await ctx.reply(formatStatusText(), menuKeyboard());
+}));
 
 /* ====== AI LAST SCAN ====== */
-tg.action("ai_last", async (ctx) => {
+tg.action("ai_last", guard(async (ctx) => {
   try {
     await ctx.answerCbQuery("AI...");
-  } catch (e) {}
+  } catch {}
 
   if (!lastScan) {
     return ctx.reply(
@@ -872,7 +964,7 @@ tg.action("ai_last", async (ctx) => {
   }
 
   await ctx.reply(
-    `AI проверяю REVIEW из последнего скана... (${candidates.length})`,
+    `🤖 AI проверяю REVIEW из последнего скана... (${candidates.length})`,
     menuKeyboard()
   );
 
@@ -901,32 +993,50 @@ tg.action("ai_last", async (ctx) => {
     }
   }
 
-  let out = `AI RESULT (последний скан)\n\n`;
-  out += `BAN: ${ban.length}\n`;
-  out += `OK: ${ok.length}\n`;
-  out += `REVIEW: ${review.length}\n\n`;
+  let out = `🤖 AI RESULT (последний скан)
 
-  if (ban.length) out += `BAN LIST:\n${ban.join("\n")}\n\n`;
-  if (review.length) out += `REVIEW LIST:\n${review.join("\n")}\n\n`;
-  if (ok.length) out += `OK LIST:\n${ok.join("\n")}\n\n`;
+`;
+  out += `⛔ BAN: ${ban.length}
+`;
+  out += `✅ OK: ${ok.length}
+`;
+  out += `🟡 REVIEW: ${review.length}
+
+`;
+
+  if (ban.length) out += `BAN LIST:
+${ban.join("
+")}
+
+`;
+  if (review.length) out += `REVIEW LIST:
+${review.join("
+")}
+
+`;
+  if (ok.length) out += `OK LIST:
+${ok.join("
+")}
+
+`;
 
   await sendChunksReply(ctx, out);
   await ctx.reply("Меню:", menuKeyboard());
-});
+}));
 
 /* ====== AI ONE NICK ====== */
 const awaitingNick = new Map();
 
-tg.action("ai_one", async (ctx) => {
+tg.action("ai_one", guard(async (ctx) => {
   try {
     await ctx.answerCbQuery();
-  } catch (e) {}
+  } catch {}
 
   awaitingNick.set(ctx.chat.id, ctx.from.id);
-  await ctx.reply("Отправь ник одним сообщением (только ник).", menuKeyboard());
-});
+  await ctx.reply("🧪 Отправь ник одним сообщением.", menuKeyboard());
+}));
 
-tg.on("text", async (ctx) => {
+tg.on("text", guard(async (ctx) => {
   const uid = awaitingNick.get(ctx.chat.id);
   if (!uid || uid !== ctx.from.id) return;
 
@@ -941,13 +1051,13 @@ tg.on("text", async (ctx) => {
   const ai = await geminiReviewNick(nick);
 
   const out =
-    `Ник: ${nick}\n` +
-    `Rules: ${s}${reasons?.length ? ` — ${reasons.join("; ")}` : ""}\n` +
-    `AI: ${ai.decision} — ${ai.reason} (${Math.round(ai.confidence * 100)}%)\n` +
-    `Нормализация: ${norm(nick)}`;
+    `🧪 Ник: ${nick}\n` +
+    `📏 Rules: ${s}${reasons?.length ? ` — ${reasons.join("; ")}` : ""}\n` +
+    `🤖 AI: ${ai.decision} — ${ai.reason} (${Math.round(ai.confidence * 100)}%)\n` +
+    `🧹 Нормализация: ${norm(nick)}`;
 
   await ctx.reply(out, menuKeyboard());
-});
+}));
 
 /* ================== AUTO SCAN ================== */
 async function runAutoScan(trigger = "timer") {
@@ -956,16 +1066,22 @@ async function runAutoScan(trigger = "timer") {
     return;
   }
 
+  const startedAt = Date.now();
+  autoScanLastRunTs = startedAt;
+
   console.log("[AUTO] start", {
     trigger,
     mcReady,
+    tabReady,
     mcOnline,
     hasChatId: !!CHAT_ID,
   });
 
-  if (!mcReady) {
+  if (!mcReady || !tabReady) {
     autoScanLastResult = "waiting_mc";
+    autoScanLastError = "MC/TAB not ready";
     console.log("[AUTO] waiting_mc");
+    scheduleNextAutoScan(Math.min(AUTO_RETRY_ON_FAIL_MINUTES, AUTO_SCAN_MINUTES) * 60 * 1000);
     return;
   }
 
@@ -980,22 +1096,21 @@ async function runAutoScan(trigger = "timer") {
   autoScanLastError = "";
 
   try {
-    const n = await collect(prefixes());
-    const r = report("Auto scan", n);
+    const scan = await collect(prefixes());
+    const r = report("Auto scan", scan.names, scan);
 
     lastScan = {
       ts: Date.now(),
-      names: n,
+      names: scan.names,
       reportText: r.out,
       reviewNicks: r.reviewNicks,
     };
-    autoScanLastRunTs = Date.now();
 
-    console.log(`[AUTO] collected names=${n.length} ban=${r.ban} review=${r.rev}`);
+    console.log(`[AUTO] collected names=${scan.names.length} ban=${r.ban} review=${r.rev}`);
 
     if (r.ban || r.rev) {
       if (PING_USER_ID) {
-        const html = `<a href="tg://user?id=${PING_USER_ID}">&#8203;</a>\n<pre>${escapeHtml(r.out)}</pre>`;
+        const html = `<a href="tg://user?id=${PING_USER_ID}">&#8203;</a>\n${reportHtml("⚠️ Автоскан: найдены совпадения", scan.names, scan)}`;
         await sendChunksChatHtml(CHAT_ID, html);
       } else {
         await sendChunksChat(CHAT_ID, r.out);
@@ -1004,19 +1119,20 @@ async function runAutoScan(trigger = "timer") {
     } else {
       autoScanLastResult = "ok_no_hits";
     }
-
-    console.log(`[AUTO] ${trigger}: ${n.length} names, ban=${r.ban}, review=${r.rev}`);
   } catch (e) {
     autoScanLastResult = "error";
     autoScanLastError = String(e?.message || e);
     console.log("[AUTO] error:", autoScanLastError);
 
     try {
-      await safeSend(CHAT_ID, `Auto scan error:\n${autoScanLastError}`);
-    } catch (err) {}
+      await safeSend(CHAT_ID, `❌ Auto scan error:\n${autoScanLastError}`);
+    } catch {}
+
+    scheduleNextAutoScan(AUTO_RETRY_ON_FAIL_MINUTES * 60 * 1000);
   } finally {
     autoScanRunning = false;
-    console.log("[AUTO] finish");
+    autoScanLastDurationMs = Date.now() - startedAt;
+    console.log("[AUTO] finish in", autoScanLastDurationMs, "ms");
   }
 }
 
@@ -1027,32 +1143,37 @@ function scheduleNextAutoScan(delayMs = AUTO_SCAN_MINUTES * 60 * 1000) {
     clearTimeout(autoScanTimer);
   }
 
+  const safeDelay = Math.max(1000, delayMs);
+  autoScanNextRunTs = Date.now() + safeDelay;
+
   autoScanTimer = setTimeout(async () => {
     await runAutoScan("timer");
     scheduleNextAutoScan();
-  }, Math.max(1000, delayMs));
+  }, safeDelay);
 }
 
 function primeAutoScan() {
   if (!AUTO_SCAN || autoScanPrimed) return;
 
   autoScanPrimed = true;
-  scheduleNextAutoScan(Math.min(15000, AUTO_SCAN_MINUTES * 60 * 1000));
+  scheduleNextAutoScan(AUTO_SCAN_MINUTES * 60 * 1000);
 
-  runAutoScan("ready").catch((e) => {
-    autoScanLastResult = "error";
-    autoScanLastError = String(e?.message || e);
-  });
+  setTimeout(() => {
+    runAutoScan("ready").catch((e) => {
+      autoScanLastResult = "error";
+      autoScanLastError = String(e?.message || e);
+    });
+  }, STARTUP_SCAN_DELAY_MS);
 }
 
 if (AUTO_SCAN) {
-  scheduleNextAutoScan();
+  scheduleNextAutoScan(STARTUP_SCAN_DELAY_MS);
 }
 
 /* ================== WATCHDOG ================== */
 setInterval(() => {
-  if (mcOnline && !mcReady) {
-    console.log("[WATCHDOG] mcOnline=true but mcReady=false, reconnecting");
+  if (mcOnline && (!mcReady || !tabReady) && !connecting) {
+    console.log("[WATCHDOG] mcOnline=true but mcReady/tabReady=false, reconnecting");
     scheduleReconnect("watchdog_not_ready");
   }
 }, 30000);
