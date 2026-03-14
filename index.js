@@ -8,6 +8,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const PING_USER_ID = process.env.PING_USER_ID ? Number(process.env.PING_USER_ID) : null;
+
 const ALLOWED_USER_IDS = new Set(
   String(process.env.ALLOWED_USER_IDS || process.env.PING_USER_ID || "")
     .split(",")
@@ -25,6 +26,7 @@ const AUTO_SCAN = (process.env.AUTO_SCAN || "1") === "1";
 const AUTO_SCAN_MINUTES = Number(process.env.AUTO_SCAN_MINUTES || 10);
 const SCAN_DELAY_MS = Number(process.env.SCAN_DELAY_MS || 200);
 const AUTO_PREFIXES = (process.env.AUTO_PREFIXES || "").trim();
+
 const READY_AFTER_MS = Number(process.env.READY_AFTER_MS || 1500);
 const STARTUP_SCAN_DELAY_MS = Number(process.env.STARTUP_SCAN_DELAY_MS || 8000);
 const TAB_WARMUP_RETRIES = Number(process.env.TAB_WARMUP_RETRIES || 4);
@@ -265,7 +267,10 @@ async function sendChunksChatHtml(chatId, html) {
   for (const p of splitText(html)) {
     if (!p.trim()) continue;
 
-    const ok = await safeSend(chatId, p, { parse_mode: "HTML", disable_web_page_preview: true });
+    const ok = await safeSend(chatId, p, {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
     if (ok) continue;
 
     const fallback = p.replace(/<[^>]+>/g, "");
@@ -697,7 +702,15 @@ async function geminiReviewNick(nick) {
 
   const normalized = norm(nick);
 
-  const prompt = `Верни СТРОГО JSON без текста вокруг:\n{"decision":"BAN|REVIEW|OK","confidence":0.0,"reason":"кратко"}\n\nBAN — явный мат/оскорбления/расизм/экстремизм/18+/наркотики/читы/маскировка под персонал/проект.\nREVIEW — сомнительно/намёк/двусмысленно.\nOK — чисто.\n\nНик: ${nick}\nНормализация: ${normalized}`;
+  const prompt = `Верни СТРОГО JSON без текста вокруг:
+{"decision":"BAN|REVIEW|OK","confidence":0.0,"reason":"кратко"}
+
+BAN — явный мат/оскорбления/расизм/экстремизм/18+/наркотики/читы/маскировка под персонал/проект.
+REVIEW — сомнительно/намёк/двусмысленно.
+OK — чисто.
+
+Ник: ${nick}
+Нормализация: ${normalized}`;
 
   try {
     const result = await geminiModel.generateContent(prompt);
@@ -805,258 +818,271 @@ function menuKeyboard() {
 }
 
 /* ================== COMMANDS ================== */
-tg.start(guard((c) => {
-  return c.reply(
-    [
-      "🚀 Бот запущен.",
-      "",
-      "/tab <префикс> — показать ники по префиксу",
-      "/tabcheck <префикс> — проверить по rules",
-      "/scanall — полный ручной скан",
-      "/autoscan — запустить автоскан сейчас",
-      "/status — статус",
-    ].join("\n"),
-    menuKeyboard()
-  );
-}));
+tg.start(
+  guard((c) => {
+    return c.reply(
+      [
+        "🚀 Бот запущен.",
+        "",
+        "/tab <префикс> — показать ники по префиксу",
+        "/tabcheck <префикс> — проверить по rules",
+        "/scanall — полный ручной скан",
+        "/autoscan — запустить автоскан сейчас",
+        "/status — статус",
+      ].join("\n"),
+      menuKeyboard()
+    );
+  })
+);
 
 tg.command("status", guard((c) => c.reply(formatStatusText(), menuKeyboard())));
 
-tg.command("autoscan", guard(async (c) => {
-  await c.reply("🔁 Запускаю автоскан вручную...", menuKeyboard());
-  await runAutoScan("manual_command");
-  await c.reply(formatStatusText(), menuKeyboard());
-}));
+tg.command(
+  "autoscan",
+  guard(async (c) => {
+    await c.reply("🔁 Запускаю автоскан вручную...", menuKeyboard());
+    await runAutoScan("manual_command");
+    await c.reply(formatStatusText(), menuKeyboard());
+  })
+);
 
-tg.command("tab", guard(async (c) => {
-  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
+tg.command(
+  "tab",
+  guard(async (c) => {
+    if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
-  const a = c.message.text.split(" ").slice(1).join(" ");
-  const n = [...new Set(await byPrefix(a))];
+    const a = c.message.text.split(" ").slice(1).join(" ");
+    const n = [...new Set(await byPrefix(a))];
 
-  let t = `🔎 Tab ${a}
-Найдено: ${n.length}
+    let t = `🔎 Tab ${a}\nНайдено: ${n.length}\n\n`;
+    n.forEach((x, i) => {
+      t += `${i + 1}) ${x}\n`;
+    });
 
-`;
-  n.forEach((x, i) => {
-    t += `${i + 1}) ${x}
-`;
-  });
+    await sendChunksReply(c, t);
+    await c.reply("Меню:", menuKeyboard());
+  })
+);
 
-  await sendChunksReply(c, t);
-  await c.reply("Меню:", menuKeyboard());
-}));
+tg.command(
+  "tabcheck",
+  guard(async (c) => {
+    if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
-tg.command("tabcheck", guard(async (c) => {
-  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
+    const a = c.message.text.split(" ").slice(1).join(" ");
+    const n = await byPrefix(a);
 
-  const a = c.message.text.split(" ").slice(1).join(" ");
-  const n = await byPrefix(a);
+    await sendChunksReply(c, report(`Tabcheck ${a}`, n).out);
+    await c.reply("Меню:", menuKeyboard());
+  })
+);
 
-  await sendChunksReply(c, report(`Tabcheck ${a}`, n).out);
-  await c.reply("Меню:", menuKeyboard());
-}));
+tg.command(
+  "scanall",
+  guard(async (c) => {
+    if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
 
-tg.command("scanall", guard(async (c) => {
-  if (!mcReady || !tabReady) return c.reply("MC/TAB не готовы", menuKeyboard());
+    await c.reply("🔎 Сканирую всех...", menuKeyboard());
 
-  await c.reply("🔎 Сканирую всех...", menuKeyboard());
+    const scan = await collect(prefixes());
+    const r = report("Ручной full scan", scan.names, scan);
 
-  const scan = await collect(prefixes());
-  const r = report("Ручной full scan", scan.names, scan);
+    lastScan = {
+      ts: Date.now(),
+      names: scan.names,
+      reportText: r.out,
+      reviewNicks: r.reviewNicks,
+    };
 
-  lastScan = {
-    ts: Date.now(),
-    names: scan.names,
-    reportText: r.out,
-    reviewNicks: r.reviewNicks,
-  };
-
-  await sendChunksReply(c, r.out);
-  await c.reply("✅ Готово. Можно нажать AI по последнему скану.", menuKeyboard());
-}));
+    await sendChunksReply(c, r.out);
+    await c.reply("✅ Готово. Можно нажать AI по последнему скану.", menuKeyboard());
+  })
+);
 
 /* ================== BUTTON HANDLERS ================== */
-tg.action("status", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch {}
+tg.action(
+  "status",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+    } catch {}
 
-  await ctx.reply(formatStatusText(), menuKeyboard());
-}));
+    await ctx.reply(formatStatusText(), menuKeyboard());
+  })
+);
 
-tg.action("reload_rules", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery("Reload...");
-  } catch {}
+tg.action(
+  "reload_rules",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Reload...");
+    } catch {}
 
-  try {
-    reloadRules();
-    await ctx.reply("♻️ rules.json перезагружен", menuKeyboard());
-  } catch (e) {
-    await ctx.reply(
-      "rules.json reload error: " + String(e?.message || e),
-      menuKeyboard()
-    );
-  }
-}));
+    try {
+      reloadRules();
+      await ctx.reply("♻️ rules.json перезагружен", menuKeyboard());
+    } catch (e) {
+      await ctx.reply(
+        "rules.json reload error: " + String(e?.message || e),
+        menuKeyboard()
+      );
+    }
+  })
+);
 
-tg.action("scan_all", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery("Scan...");
-  } catch {}
+tg.action(
+  "scan_all",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Scan...");
+    } catch {}
 
-  if (!mcReady || !tabReady) return ctx.reply("MC/TAB не готовы", menuKeyboard());
+    if (!mcReady || !tabReady) return ctx.reply("MC/TAB не готовы", menuKeyboard());
 
-  await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
+    await ctx.reply("🔎 Сканирую всех...", menuKeyboard());
 
-  const scan = await collect(prefixes());
-  const r = report("Full scan (button)", scan.names, scan);
+    const scan = await collect(prefixes());
+    const r = report("Full scan (button)", scan.names, scan);
 
-  lastScan = {
-    ts: Date.now(),
-    names: scan.names,
-    reportText: r.out,
-    reviewNicks: r.reviewNicks,
-  };
+    lastScan = {
+      ts: Date.now(),
+      names: scan.names,
+      reportText: r.out,
+      reviewNicks: r.reviewNicks,
+    };
 
-  await sendChunksReply(ctx, r.out);
-  await ctx.reply("✅ Готово. Нажми AI по последнему скану.", menuKeyboard());
-}));
+    await sendChunksReply(ctx, r.out);
+    await ctx.reply("✅ Готово. Нажми AI по последнему скану.", menuKeyboard());
+  })
+);
 
-tg.action("auto_now", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery("Auto scan...");
-  } catch {}
+tg.action(
+  "auto_now",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Auto scan...");
+    } catch {}
 
-  await ctx.reply("🔁 Форсирую автоскан...", menuKeyboard());
-  await runAutoScan("manual_button");
-  await ctx.reply(formatStatusText(), menuKeyboard());
-}));
+    await ctx.reply("🔁 Форсирую автоскан...", menuKeyboard());
+    await runAutoScan("manual_button");
+    await ctx.reply(formatStatusText(), menuKeyboard());
+  })
+);
 
 /* ====== AI LAST SCAN ====== */
-tg.action("ai_last", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery("AI...");
-  } catch {}
+tg.action(
+  "ai_last",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery("AI...");
+    } catch {}
 
-  if (!lastScan) {
-    return ctx.reply(
-      "Нет последнего скана. Сначала сделай /scanall или кнопку скана",
-      menuKeyboard()
-    );
-  }
-
-  if (!AI_ENABLED || !geminiModel) {
-    return ctx.reply(
-      "AI выключен (нет GEMINI_API_KEY или AI_ENABLED=0)",
-      menuKeyboard()
-    );
-  }
-
-  const candidates = [...(lastScan.reviewNicks || [])];
-  if (!candidates.length) {
-    return ctx.reply(
-      "В последнем скане нет REVIEW. AI нечего проверять.",
-      menuKeyboard()
-    );
-  }
-
-  await ctx.reply(
-    `🤖 AI проверяю REVIEW из последнего скана... (${candidates.length})`,
-    menuKeyboard()
-  );
-
-  const ban = [];
-  const ok = [];
-  const review = [];
-  let budget = Math.max(0, AI_BUDGET_PER_CLICK);
-
-  for (const nick of candidates) {
-    if (budget <= 0) {
-      review.push(`${nick} (лимит AI исчерпан)`);
-      continue;
+    if (!lastScan) {
+      return ctx.reply(
+        "Нет последнего скана. Сначала сделай /scanall или кнопку скана",
+        menuKeyboard()
+      );
     }
 
-    budget--;
-
-    const ai = await geminiReviewNick(nick);
-    await sleep(AI_DELAY_MS);
-
-    if (ai.decision === "BAN" && ai.confidence >= AI_MIN_CONF_FOR_BAN) {
-      ban.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
-    } else if (ai.decision === "OK" && ai.confidence >= AI_MIN_CONF_FOR_OK) {
-      ok.push(`${nick} (AI OK, ${Math.round(ai.confidence * 100)}%)`);
-    } else {
-      review.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+    if (!AI_ENABLED || !geminiModel) {
+      return ctx.reply(
+        "AI выключен (нет GEMINI_API_KEY или AI_ENABLED=0)",
+        menuKeyboard()
+      );
     }
-  }
 
-  let out = `🤖 AI RESULT (последний скан)
+    const candidates = [...(lastScan.reviewNicks || [])];
+    if (!candidates.length) {
+      return ctx.reply(
+        "В последнем скане нет REVIEW. AI нечего проверять.",
+        menuKeyboard()
+      );
+    }
 
-`;
-  out += `⛔ BAN: ${ban.length}
-`;
-  out += `✅ OK: ${ok.length}
-`;
-  out += `🟡 REVIEW: ${review.length}
+    await ctx.reply(
+      `🤖 AI проверяю REVIEW из последнего скана... (${candidates.length})`,
+      menuKeyboard()
+    );
 
-`;
+    const ban = [];
+    const ok = [];
+    const review = [];
+    let budget = Math.max(0, AI_BUDGET_PER_CLICK);
 
-  if (ban.length) out += `BAN LIST:
-${ban.join("
-")}
+    for (const nick of candidates) {
+      if (budget <= 0) {
+        review.push(`${nick} (лимит AI исчерпан)`);
+        continue;
+      }
 
-`;
-  if (review.length) out += `REVIEW LIST:
-${review.join("
-")}
+      budget--;
 
-`;
-  if (ok.length) out += `OK LIST:
-${ok.join("
-")}
+      const ai = await geminiReviewNick(nick);
+      await sleep(AI_DELAY_MS);
 
-`;
+      if (ai.decision === "BAN" && ai.confidence >= AI_MIN_CONF_FOR_BAN) {
+        ban.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+      } else if (ai.decision === "OK" && ai.confidence >= AI_MIN_CONF_FOR_OK) {
+        ok.push(`${nick} (AI OK, ${Math.round(ai.confidence * 100)}%)`);
+      } else {
+        review.push(`${nick} (AI: ${ai.reason}, ${Math.round(ai.confidence * 100)}%)`);
+      }
+    }
 
-  await sendChunksReply(ctx, out);
-  await ctx.reply("Меню:", menuKeyboard());
-}));
+    let out = `🤖 AI RESULT (последний скан)\n\n`;
+    out += `⛔ BAN: ${ban.length}\n`;
+    out += `✅ OK: ${ok.length}\n`;
+    out += `🟡 REVIEW: ${review.length}\n\n`;
+
+    if (ban.length) out += `BAN LIST:\n${ban.join("\n")}\n\n`;
+    if (review.length) out += `REVIEW LIST:\n${review.join("\n")}\n\n`;
+    if (ok.length) out += `OK LIST:\n${ok.join("\n")}\n\n`;
+
+    await sendChunksReply(ctx, out);
+    await ctx.reply("Меню:", menuKeyboard());
+  })
+);
 
 /* ====== AI ONE NICK ====== */
 const awaitingNick = new Map();
 
-tg.action("ai_one", guard(async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch {}
+tg.action(
+  "ai_one",
+  guard(async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+    } catch {}
 
-  awaitingNick.set(ctx.chat.id, ctx.from.id);
-  await ctx.reply("🧪 Отправь ник одним сообщением.", menuKeyboard());
-}));
+    awaitingNick.set(ctx.chat.id, ctx.from.id);
+    await ctx.reply("🧪 Отправь ник одним сообщением.", menuKeyboard());
+  })
+);
 
-tg.on("text", guard(async (ctx) => {
-  const uid = awaitingNick.get(ctx.chat.id);
-  if (!uid || uid !== ctx.from.id) return;
+tg.on(
+  "text",
+  guard(async (ctx) => {
+    const uid = awaitingNick.get(ctx.chat.id);
+    if (!uid || uid !== ctx.from.id) return;
 
-  awaitingNick.delete(ctx.chat.id);
+    awaitingNick.delete(ctx.chat.id);
 
-  const nick = String(ctx.message.text || "").trim();
-  if (!nick) {
-    return ctx.reply("Пусто. Пришли ник.", menuKeyboard());
-  }
+    const nick = String(ctx.message.text || "").trim();
+    if (!nick) {
+      return ctx.reply("Пусто. Пришли ник.", menuKeyboard());
+    }
 
-  const [s, reasons] = checkNick(nick);
-  const ai = await geminiReviewNick(nick);
+    const [s, reasons] = checkNick(nick);
+    const ai = await geminiReviewNick(nick);
 
-  const out =
-    `🧪 Ник: ${nick}\n` +
-    `📏 Rules: ${s}${reasons?.length ? ` — ${reasons.join("; ")}` : ""}\n` +
-    `🤖 AI: ${ai.decision} — ${ai.reason} (${Math.round(ai.confidence * 100)}%)\n` +
-    `🧹 Нормализация: ${norm(nick)}`;
+    const out =
+      `🧪 Ник: ${nick}\n` +
+      `📏 Rules: ${s}${reasons?.length ? ` — ${reasons.join("; ")}` : ""}\n` +
+      `🤖 AI: ${ai.decision} — ${ai.reason} (${Math.round(ai.confidence * 100)}%)\n` +
+      `🧹 Нормализация: ${norm(nick)}`;
 
-  await ctx.reply(out, menuKeyboard());
-}));
+    await ctx.reply(out, menuKeyboard());
+  })
+);
 
 /* ================== AUTO SCAN ================== */
 async function runAutoScan(trigger = "timer") {
@@ -1080,7 +1106,9 @@ async function runAutoScan(trigger = "timer") {
     autoScanLastResult = "waiting_mc";
     autoScanLastError = "MC/TAB not ready";
     console.log("[AUTO] waiting_mc");
-    scheduleNextAutoScan(Math.min(AUTO_RETRY_ON_FAIL_MINUTES, AUTO_SCAN_MINUTES) * 60 * 1000);
+    scheduleNextAutoScan(
+      Math.min(AUTO_RETRY_ON_FAIL_MINUTES, AUTO_SCAN_MINUTES) * 60 * 1000
+    );
     return;
   }
 
@@ -1109,7 +1137,9 @@ async function runAutoScan(trigger = "timer") {
 
     if (r.ban || r.rev) {
       if (PING_USER_ID) {
-        const html = `<a href="tg://user?id=${PING_USER_ID}">&#8203;</a>\n${reportHtml("⚠️ Автоскан: найдены совпадения", scan.names, scan)}`;
+        const html =
+          `<a href="tg://user?id=${PING_USER_ID}">&#8203;</a>\n` +
+          reportHtml("⚠️ Автоскан: найдены совпадения", scan.names, scan);
         await sendChunksChatHtml(CHAT_ID, html);
       } else {
         await sendChunksChat(CHAT_ID, r.out);
